@@ -1,0 +1,268 @@
+import {businessID,encodeTaskContent,serializeBiandanWrite} from './model.js';
+import {inspectSubtasks,subtaskGoal,validateSubtaskPatch} from './subtasks.js';
+
+const attributes = record => record?.attributes || {};
+const has = (value,key) => Object.prototype.hasOwnProperty.call(value,key);
+const number = value => Number.isFinite(Number(value)) ? Number(value) : 0;
+const conflict = () => Object.assign(new Error('记录或操作范围已在其他客户端变更，请刷新后重新确认'),{status:409});
+function identity(record) {
+  const id = typeof record === 'string' ? record : record?.id;
+  if (typeof id !== 'string' || !id.trim()) throw new Error('云记录身份无效，请刷新后重试');
+  return id;
+}
+async function fresh(client,kind,record,expectedVersion) {
+  const expected = expectedVersion ?? record?.version;
+  if (expected === undefined || expected === null) throw new Error('操作前请先读取记录版本');
+  const current = await client.get(kind,identity(record));
+  if (String(current.version) !== String(expected)) throw conflict();
+  const field = kind === 'Task' ? 'id1' : kind === 'showTask' ? 'id2' : 'id3';
+  const currentId = businessID(attributes(current)[field]);
+  if (!currentId || currentId === '0') throw new Error('记录业务身份无法确认，请在便单客户端核查');
+  if (record?.attributes && businessID(record.attributes[field]) !== currentId) throw conflict();
+  return current;
+}
+function title(value,label,max) {
+  if (typeof value !== 'string' || !value.trim() || value.trim().length > max || /[\x00-\x1f\x7f]/.test(value)) throw new Error(`请输入不超过 ${max} 字的${label}`);
+  return value.trim();
+}
+function color(value) {
+  if (!Number.isInteger(value) || value < 0 || value > 24) throw new Error('请选择 0–24 范围内的待办单颜色');
+  return value;
+}
+function encodedColor(value) {
+  const numeric = Number(value ?? 0);
+  if (!Number.isSafeInteger(numeric) || numeric < 0 || numeric % 100 > 24) throw new Error('待办单已有排序或颜色无效，请先在便单客户端核查');
+  return numeric;
+}
+const validListId = value => {
+  const id = businessID(value);
+  if (!id || !Number.isSafeInteger(Number(id)) || Number(id) < 1) throw new Error('待办单 ID 无效');
+  return id;
+};
+async function signature(value) {
+  const bytes = new TextEncoder().encode(JSON.stringify(value));
+  return Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',bytes)),value => value.toString(16).padStart(2,'0')).join('');
+}
+function recordIdentity(record) { return [String(record.id),String(record.version)]; }
+const sortedIdentities = records => records.map(recordIdentity).sort((a,b) => a[0].localeCompare(b[0]));
+const scheduleFields = ['startDate','endDate','startTime','endTime','noTime'];
+function date(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(value+'T12:00:00');
+  return Number.isFinite(parsed.getTime()) && `${parsed.getFullYear()}-${String(parsed.getMonth()+1).padStart(2,'0')}-${String(parsed.getDate()).padStart(2,'0')}` === value;
+}
+function clock(value) {
+  const text = typeof value === 'string' && value.length === 5 ? value+':00' : value;
+  if (typeof text !== 'string' || !/^([01]\d|2[0-3]):[0-5]\d:[0-5]\d$/.test(text)) throw new Error('请输入有效的待办时段');
+  return text;
+}
+function taskWindow(parent,occurrence,patch) {
+  const original = attributes(parent),instance = attributes(occurrence);
+  if (has(patch,'noTime') && typeof patch.noTime !== 'boolean') throw new Error('待安排状态必须为勾选状态');
+  const noTime = has(patch,'noTime') ? patch.noTime : number(original.haveNoTime) === 1;
+  const startTime = noTime ? '1970-01-01' : patch.startDate ?? instance.startTime ?? original.startTime;
+  const endTime = noTime ? '2100-12-31' : patch.endDate ?? instance.endTime ?? original.endTime ?? startTime;
+  const validStartTime = noTime ? '00:00:00' : clock(patch.startTime ?? instance.validStartTime ?? original.validStartTime ?? '00:00:00');
+  const validEndTime = noTime ? '23:59:59' : clock(patch.endTime ?? instance.validEndTime ?? original.validEndTime ?? '23:59:59');
+  if (!date(startTime) || !date(endTime) || startTime+' '+validStartTime > endTime+' '+validEndTime) throw new Error('待办起止日期或时间无效');
+  return {noTime,fields:{startTime,endTime,validStartTime,validEndTime}};
+}
+function changedAttributes(record,changes) {
+  return Object.fromEntries(Object.entries(changes).filter(([key,value]) => {
+    const previous = attributes(record)[key];
+    return typeof value === 'number' ? !(previous !== null && previous !== undefined && String(previous).trim() !== '' && Number(previous) === value) : previous !== value;
+  }));
+}
+function verifyPreview(preview,current,kind) {
+  if (!preview || preview.kind !== kind || typeof preview.fingerprint !== 'string' || preview.fingerprint !== current.fingerprint) throw conflict();
+}
+function uncertain(error,message,progress = {}) {
+  const partial = Object.values(progress).some(value => typeof value === 'number' && value > 0);
+  return Object.assign(new Error(message),{commitState:partial ? 'partial' : 'unknown',...progress,cause:error});
+}
+
+/** Patch shared definition fields only; preserve attachments, checklists,
+ * recurrence, reminders, history and unrecognized properties. */
+export function updateTask(client,parentRecord,patch,{expectedVersion,occurrence,expectedOccurrenceVersion} = {}) {
+  return serializeBiandanWrite(client,async () => {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length || Object.keys(patch).some(key => !['title','remark','attachments','subtasks','important','urgent','collectible','listId',...scheduleFields].includes(key))) throw new Error('待办编辑字段无效');
+    const parent = await fresh(client,'Task',parentRecord,expectedVersion),changes = {};
+    const editingSubtasks = has(patch,'subtasks'),editingSchedule = scheduleFields.some(key => has(patch,key));
+    if (has(patch,'title')) changes.taskTitle = title(patch.title,'待办标题',500);
+    if (has(patch,'remark') || has(patch,'attachments')) {
+      const contentPatch = {...(has(patch,'remark') ? {remark:patch.remark} : {}),...(has(patch,'attachments') ? {attachments:patch.attachments} : {})};
+      changes.taskContent = encodeTaskContent(attributes(parent).taskContent,contentPatch);
+    }
+    for (const [source,destination] of [['important','isImportant'],['urgent','isUrgency'],['collectible','isCollectible']]) {
+      if (!has(patch,source)) continue;
+      if (typeof patch[source] !== 'boolean') throw new Error('待办标志必须为勾选状态');
+      changes[destination] = +patch[source];
+    }
+    if (has(patch,'listId')) {
+      const id = validListId(patch.listId);
+      if (id !== '1' && (await client.list('favorites')).filter(row => businessID(attributes(row).id3) === id).length !== 1) throw new Error('找不到唯一的待办单，请刷新后重新选择');
+      changes.id3 = Number(id);
+    }
+    let selected,window,subtaskChanges = {};
+    if (editingSchedule || editingSubtasks) {
+      if (number(attributes(parent).isLoop) > 0 || number(attributes(parent).loopSet) > 0) throw new Error(editingSubtasks ? '重复或习惯待办的子计划增删请在便单客户端操作；本次未写入' : '重复或习惯待办的排期请在便单客户端修改；本次未写入');
+      if (!occurrence) throw new Error('修改排期或子计划前请先读取唯一执行实例及版本');
+      selected = await fresh(client,'showTask',occurrence,expectedOccurrenceVersion);
+      const taskId = businessID(attributes(parent).id1);
+      const siblings = (await client.list('showTask')).filter(row => businessID(attributes(row).id1) === taskId);
+      if (businessID(attributes(selected).id1) !== taskId || siblings.length !== 1 || siblings[0].id !== selected.id || businessID(attributes(siblings[0]).id2) !== businessID(attributes(selected).id2)) throw new Error('一次性待办包含额外或不匹配实例，不能修改排期或子计划，请先核查');
+      if (String(siblings[0].version) !== String(selected.version)) throw conflict();
+    }
+    if (editingSchedule) {
+      window = taskWindow(parent,selected,patch);
+      Object.assign(changes,window.fields,{haveNoTime:+window.noTime});
+      if (window.noTime) {
+        const flags = number(attributes(parent).isRemind);
+        if (!Number.isSafeInteger(flags) || flags < 0) throw new Error('已有提醒标志无法确认，请先核查');
+        // Native clear-schedule disables only its time reminder. Preserve the
+        // independent location reminder and all unknown bits.
+        changes.isRemind = flags % 2 ? flags-1 : flags;
+      }
+    }
+    if (editingSubtasks) {
+      const state = inspectSubtasks(attributes(parent),attributes(selected));
+      if (!state.canEdit) throw new Error(state.reason || '此待办暂不能修改子计划');
+      const plan = validateSubtaskPatch(patch.subtasks,state.total),goal = subtaskGoal(plan.length);
+      const completed = plan.map(entry => entry.sourceIndex === null ? false : state.completed[entry.sourceIndex]);
+      const progress = plan.length ? Number(completed.reduce((mask,done,index) => done ? mask | (1n << BigInt(index)) : mask,0n)*100n) : +Boolean(Number(attributes(selected).isFinish));
+      const finish = +(progress === goal);
+      // Edit content once so simultaneous remark/attachment/subplan changes
+      // retain the original native bundle and unrelated fields.
+      changes.taskContent = encodeTaskContent(attributes(parent).taskContent,{
+        ...(has(patch,'remark') ? {remark:patch.remark} : {}),
+        ...(has(patch,'attachments') ? {attachments:patch.attachments} : {}),
+        subtasks:plan.map(entry => entry.title),
+      });
+      changes.unitTimeNumber = goal;changes.isFinish = finish;
+      subtaskChanges = {completedCount:progress,isFinish:finish};
+      if (Number(attributes(selected).completedCount) !== progress || Number(attributes(selected).isFinish) !== finish) {
+        const now = new Date(),date = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+        subtaskChanges.recentFinishedTime = `${date} ${String(now.getHours()).padStart(2,'0')}:${String(now.getMinutes()).padStart(2,'0')}:00`;
+      }
+    }
+    const parentChanges = changedAttributes(parent,changes);
+    let saved = parent,confirmedWrites = 0;
+    try {
+      if (Object.keys(parentChanges).length) {saved = await client.update('Task',parent.id,parent.version,parentChanges);confirmedWrites++;}
+      if (selected) {
+        if (editingSubtasks) {
+          const currentParent = await fresh(client,'Task',saved,saved.version);
+          if (attributes(currentParent).taskContent !== attributes(saved).taskContent || Number(attributes(currentParent).unitTimeNumber) !== Number(attributes(saved).unitTimeNumber)) throw conflict();
+        }
+        const instanceChanges = changedAttributes(selected,{...(window?.fields || {}),...subtaskChanges});
+        if (Object.keys(instanceChanges).length) {selected = await client.update('showTask',selected.id,selected.version,instanceChanges);confirmedWrites++;}
+        if (editingSubtasks) {
+          await fresh(client,'Task',saved,saved.version);
+          const finalSiblings = (await client.list('showTask')).filter(row => businessID(attributes(row).id1) === businessID(attributes(saved).id1));
+          if (finalSiblings.length !== 1 || finalSiblings[0].id !== selected.id || String(finalSiblings[0].version) !== String(selected.version)) throw new Error('子计划保存期间执行实例范围已变化，请刷新核查');
+        }
+        return {...saved,occurrence:selected};
+      }
+      return saved;
+    } catch (error) {
+      if (!confirmedWrites && error.status === 409) throw error;
+      throw uncertain(error,'待办保存尚待核查，标题/备注、子计划或排期可能已部分提交；请刷新核对后再操作',{confirmedWrites});
+    }
+  });
+}
+
+export function updateList(client,listRecord,patch,{expectedVersion} = {}) {
+  return serializeBiandanWrite(client,async () => {
+    if (!patch || typeof patch !== 'object' || Array.isArray(patch) || !Object.keys(patch).length || Object.keys(patch).some(key => !['name','color'].includes(key))) throw new Error('待办单编辑字段无效');
+    const current = await fresh(client,'favorites',listRecord,expectedVersion);
+    if (businessID(attributes(current).id3) === '1') throw new Error('默认待办单不能编辑');
+    const changes = {};
+    if (has(patch,'name')) changes.favoritesName = title(patch.name,'待办单名称',200);
+    if (has(patch,'color')) changes.favoritesColor = Math.floor(encodedColor(attributes(current).favoritesColor)/100)*100 + color(patch.color);
+    return client.update('favorites',current.id,current.version,changes);
+  });
+}
+
+export async function previewTaskDeletion(client,parentRecord,occurrenceRecord,{expectedTaskVersion,expectedOccurrenceVersion} = {}) {
+  const [parent,occurrence] = await Promise.all([
+    fresh(client,'Task',parentRecord,expectedTaskVersion),
+    fresh(client,'showTask',occurrenceRecord,expectedOccurrenceVersion),
+  ]);
+  const taskId = businessID(attributes(parent).id1);
+  if (businessID(attributes(occurrence).id1) !== taskId) throw new Error('执行实例不属于所选待办，请刷新核查');
+  const siblings = (await client.list('showTask')).filter(row => businessID(attributes(row).id1) === taskId);
+  if (siblings.filter(row => row.id === occurrence.id && businessID(attributes(row).id2) === businessID(attributes(occurrence).id2)).length !== 1) throw new Error('所选执行实例未唯一同步，已停止删除');
+  const repeating = number(attributes(parent).isLoop) > 0 || number(attributes(parent).loopSet) > 0;
+  if (!repeating && (siblings.length !== 1 || siblings[0].id !== occurrence.id)) throw new Error('一次性待办包含额外实例，不能按当前范围删除，请在便单客户端核查');
+  const scope = repeating ? 'occurrence' : 'one-off';
+  const state = [scope,recordIdentity(parent),recordIdentity(occurrence),sortedIdentities(siblings)];
+  return {kind:'task-delete',scope,title:String(attributes(parent).taskTitle || '未命名待办'),taskId,occurrenceId:businessID(attributes(occurrence).id2),taskRecordId:parent.id,occurrenceRecordId:occurrence.id,occurrenceCount:1,deletesTaskDefinition:!repeating,fingerprint:await signature(state)};
+}
+
+export function deleteTask(client,parentRecord,occurrenceRecord,{preview,expectedTaskVersion,expectedOccurrenceVersion} = {}) {
+  return serializeBiandanWrite(client,async () => {
+    const plan = await previewTaskDeletion(client,parentRecord,occurrenceRecord,{expectedTaskVersion,expectedOccurrenceVersion});
+    verifyPreview(preview,plan,'task-delete');
+    // Fresh reads above ensure the confirmation still refers to the same
+    // records, versions and complete sibling set before the first write.
+    const parent = await fresh(client,'Task',parentRecord,expectedTaskVersion);
+    const occurrence = await fresh(client,'showTask',occurrenceRecord,expectedOccurrenceVersion);
+    let removedOccurrences = 0;
+    try {
+      await client.remove('showTask',occurrence.id,occurrence.version);removedOccurrences++;
+      const remaining = (await client.list('showTask')).filter(row => businessID(attributes(row).id1) === plan.taskId);
+      if (remaining.some(row => row.id === occurrence.id)) throw new Error('实例删除尚未确认');
+      if (plan.deletesTaskDefinition) {
+        if (remaining.length) throw new Error('删除期间出现了其他实例，已保留父任务');
+        await client.remove('Task',parent.id,parent.version);
+        if ((await client.list('Task')).some(row => row.id === parent.id || businessID(attributes(row).id1) === plan.taskId)) throw new Error('父任务删除尚未确认');
+      } else {
+        const summary = remaining.length && !remaining.some(row => number(attributes(row).isFinish) === 0 && number(attributes(row).completedCount) >= 0) ? 1 : 0;
+        const current = await client.get('Task',parent.id);
+        if (String(current.version) !== String(parent.version)) throw conflict();
+        if (number(attributes(current).isFinish) !== summary) await client.update('Task',parent.id,parent.version,{isFinish:summary});
+      }
+      return {...plan,deleted:true};
+    } catch (error) {
+      throw uncertain(error,'删除操作尚待核查，可能已删除本次实例；请刷新后核对，不会自动重复删除',{removedOccurrences});
+    }
+  });
+}
+
+export async function previewListDeletion(client,listRecord,{expectedVersion,taskAction = 'move_to_default'} = {}) {
+  if (taskAction !== 'move_to_default') throw new Error('此入口仅支持保留待办并移到未分类');
+  const current = await fresh(client,'favorites',listRecord,expectedVersion);
+  const listId = businessID(attributes(current).id3);
+  if (listId === '1') throw new Error('默认待办单不能删除');
+  const tasks = (await client.list('Task')).filter(row => businessID(attributes(row).id3) === listId);
+  if (tasks.length > 100) throw new Error('该待办单超过 100 个任务，请先分批移动任务后再删除');
+  if (new Set(tasks.map(row => businessID(attributes(row).id1))).size !== tasks.length) throw new Error('待办单包含重复业务身份，请先核查，未执行删除');
+  return {kind:'list-delete',listId,listRecordId:current.id,name:String(attributes(current).favoritesName || '未命名待办单'),taskCount:tasks.length,taskAction,fingerprint:await signature([recordIdentity(current),sortedIdentities(tasks)])};
+}
+
+/** Keep every Task and showTask. Only move definition references to id3=1,
+ * then delete the custom list after confirming no remaining references. */
+export function deleteList(client,listRecord,{preview,expectedVersion,taskAction = 'move_to_default'} = {}) {
+  return serializeBiandanWrite(client,async () => {
+    const plan = await previewListDeletion(client,listRecord,{expectedVersion,taskAction});
+    verifyPreview(preview,plan,'list-delete');
+    const current = await fresh(client,'favorites',listRecord,expectedVersion);
+    const tasks = (await client.list('Task')).filter(row => businessID(attributes(row).id3) === plan.listId);
+    // Recheck the confirmation again after the extra preflight read.
+    if (await signature([recordIdentity(current),sortedIdentities(tasks)]) !== plan.fingerprint) throw conflict();
+    let movedTasks = 0;
+    try {
+      for (const row of tasks) {
+        const task = await client.get('Task',row.id);
+        if (String(task.version) !== String(row.version) || businessID(attributes(task).id3) !== plan.listId) throw conflict();
+        await client.update('Task',row.id,row.version,{id3:1});movedTasks++;
+      }
+      if ((await client.list('Task')).some(row => businessID(attributes(row).id3) === plan.listId)) throw new Error('仍有任务引用待办单，已保留待办单');
+      await client.remove('favorites',current.id,current.version);
+      if ((await client.list('favorites')).some(row => row.id === current.id || businessID(attributes(row).id3) === plan.listId)) throw new Error('待办单删除尚未确认');
+      return {...plan,movedTasks,deleted:true};
+    } catch (error) {
+      throw uncertain(error,`待办单删除尚待核查，已确认 ${movedTasks} 项待办移到未分类；请刷新核对，未自动重试`,{movedTasks});
+    }
+  });
+}

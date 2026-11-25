@@ -1,0 +1,23 @@
+const paths = {
+  check:'<path d="m5 10 3 3 7-7"/>', list:'<path d="M7 5h10M7 10h10M7 15h10M3 5h.01M3 10h.01M3 15h.01"/>',
+  sun:'<circle cx="10" cy="10" r="4"/><path d="M10 1v2m0 14v2M1 10h2m14 0h2M3.6 3.6 5 5m10 10 1.4 1.4M3.6 16.4 5 15m10-10 1.4-1.4"/>',
+  calendar:'<rect x="3" y="4" width="14" height="13" rx="3"/><path d="M6 2v4m8-4v4M3 8h14m-11 3h2m3 0h2m-7 3h2"/>',
+  grid:'<rect x="3" y="3" width="5" height="5" rx="1"/><rect x="12" y="3" width="5" height="5" rx="1"/><rect x="3" y="12" width="5" height="5" rx="1"/><rect x="12" y="12" width="5" height="5" rx="1"/>',
+  habit:'<path d="M10 3a7 7 0 1 0 7 7M10 1v4m-2-2h4m-5 7 2 2 5-5"/>',
+  timer:'<circle cx="10" cy="11" r="7"/><path d="M8 1h4m-2 3v3m0 4 3-3m2-4 2-2"/>',
+  folder:'<path d="M2 6a2 2 0 0 1 2-2h4l2 2h6a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2Z"/>',
+  star:'<path d="m10 2 2.4 4.9 5.4.8-3.9 3.8.9 5.4-4.8-2.5-4.8 2.5.9-5.4-3.9-3.8 5.4-.8Z"/>',
+  important:'<circle cx="10" cy="10" r="8"/><path d="M10 5v6m0 3h.01"/>',
+  plus:'<path d="M10 3v14M3 10h14"/>', close:'<path d="m5 5 10 10M15 5 5 15"/>',
+  refresh:'<path d="M16.7 7A7 7 0 0 0 4.4 4.6L2 7m0-4v4h4M3.3 13a7 7 0 0 0 12.3 2.4L18 13m0 4v-4h-4"/>',
+  edit:'<path d="m11.8 3.2 5 5M3 17l4.2-.9L17 6.3a1.7 1.7 0 0 0 0-2.4l-.9-.9a1.7 1.7 0 0 0-2.4 0L3.9 12.8 3 17Z"/>',
+  trash:'<path d="M3 5h14M7 5V3h6v2M5 5l1 12h8l1-12M8 8v6m4-6v6"/>',
+  more:'<circle cx="4" cy="10" r=".7"/><circle cx="10" cy="10" r=".7"/><circle cx="16" cy="10" r=".7"/>',
+  grip:'<circle cx="7" cy="5" r=".6"/><circle cx="13" cy="5" r=".6"/><circle cx="7" cy="10" r=".6"/><circle cx="13" cy="10" r=".6"/><circle cx="7" cy="15" r=".6"/><circle cx="13" cy="15" r=".6"/>',
+  attachment:'<path d="m7 11 5-5a2 2 0 0 1 3 3l-6 6a3.6 3.6 0 0 1-5-5l7-7a4.3 4.3 0 0 1 6 6l-7 7"/>',
+  file:'<path d="M5 2h7l4 4v12H5V2Zm7 0v5h4M8 11h5m-5 3h5"/>',
+  arrow:'<path d="m7 4 6 6-6 6"/>', settings:'<path d="M4 5h12M4 10h12M4 15h12"/><circle cx="7" cy="5" r="2"/><circle cx="13" cy="10" r="2"/><circle cx="8" cy="15" r="2"/>',
+  cloud:'<path d="M5 15a4 4 0 0 1-1-7 6 6 0 0 1 11-1 4 4 0 0 1 1 8M10 17V9m-3 3 3-3 3 3"/>',
+  play:'<path d="m7 4 9 6-9 6Z"/>', pause:'<path d="M7 4v12M13 4v12"/>',
+};
+export function icon(name) {return `<svg aria-hidden="true" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">${paths[name] || paths.list}</svg>`;}

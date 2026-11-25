@@ -1,0 +1,21 @@
+{
+  "name": "siyuan-biandan",
+  "version": "0.3.3",
+  "private": true,
+  "type": "module",
+  "license": "MIT",
+  "author": "ShiShiBits",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ShiShiBits1/siyuan-biandan.git"
+  },
+  "scripts": {
+    "build": "vite build",
+    "validate:marketplace": "node scripts/Validate-Marketplace.mjs --directory dist"
+  },
+  "devDependencies": {
+    "fflate": "0.8.2",
+    "siyuan": "1.2.9",
+    "vite": "6.4.5"
+  }
+}
