@@ -1,0 +1,12 @@
+node_modules/
+dist/
+package.zip
+*.zip
+*.log
+.tools/
+tests/
+data/
+storage/
+.env
+.env.*
+.npmrc
