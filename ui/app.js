@@ -1,4 +1,6 @@
 import {icon} from './icons.js';
+import {mountAdaptiveShell} from './mobile-shell.js';
+import {mountAuthorizationPrompt} from './authorization-prompt.js';
 import {brandIcon} from './brand.js';
 import {businessID,decodeContent} from '../src/model.js';
 import {ATTACHMENT_ACCEPT,MAX_ATTACHMENT_COUNT,MAX_ATTACHMENT_BYTES,parseManagedAttachments,getSiyuanAssetURL} from '../src/attachments.js';
@@ -32,12 +34,14 @@ export function mountBiandanApp(host, options = {}) {
   const win = doc.defaultView;
   const hadHostClass = host.classList.contains('bd-plugin-host');
   host.classList.add('bd-plugin-host');
-  host.innerHTML = `<div class="bd-app"><aside class="bd-nav" aria-label="便单导航"><div class="bd-brand"><img src="${escape(brandIcon)}" alt="" width="36" height="36"><div><strong>便单伴侣</strong><small>思源 · 第三方客户端</small></div></div><nav></nav><div class="bd-nav__foot"><button data-action="connect">${icon('cloud')}连接便单</button><button data-action="settings">${icon('settings')}连接设置</button></div></aside><div class="bd-lists"><div class="bd-lists__title"><h2>待办单</h2><button data-action="new-list" title="新建待办单" aria-label="新建待办单">${icon('plus')}</button></div><div class="bd-lists__items"></div><div class="bd-source"><span class="bd-source__dot"></span><span data-sync-text>尚未连接云端</span></div></div><main class="bd-main"><header class="bd-top"><div><div class="bd-top__date"></div><h1>今日</h1></div><div class="bd-top__actions"><button class="bd-nav-toggle" data-action="navigation" aria-label="展开导航" aria-expanded="false">${icon('list')}</button><button class="bd-series-recovery-button" data-action="inspect-series-migrations" aria-label="核查未完成的系列调整" title="核查未完成的系列调整">${icon('important')}</button><button data-action="refresh" aria-label="刷新便单" title="刷新便单">${icon('refresh')}</button></div></header><div class="bd-feedback" role="status" hidden></div><div class="bd-body"></div></main><button class="bd-fab" data-action="new-task" aria-label="新建待办" title="新建待办">${icon('plus')}</button><aside class="bd-editor" aria-label="待办编辑" tabindex="-1" hidden></aside></div>`;
+  host.innerHTML = `<div class="bd-app"><button class="bd-drawer-backdrop" data-action="close-drawer" aria-label="关闭导航" hidden></button><aside class="bd-nav" aria-label="便单导航"><button class="bd-drawer-close" data-action="close-drawer" aria-label="关闭导航">${icon('close')}</button><div class="bd-brand"><img src="${escape(brandIcon)}" alt="" width="36" height="36"><div><strong>便单伴侣</strong><small>思源 · 第三方客户端</small></div></div><nav></nav><div class="bd-nav__foot"><button data-action="connect">${icon('cloud')}连接便单</button><button data-action="settings">${icon('settings')}连接设置</button></div></aside><div class="bd-lists"><div class="bd-lists__title"><h2>待办单</h2><button class="bd-drawer-close" data-action="close-drawer" aria-label="关闭待办单">${icon('close')}</button><button data-action="new-list" title="新建待办单" aria-label="新建待办单">${icon('plus')}</button></div><div class="bd-lists__items"></div><div class="bd-source"><span class="bd-source__dot"></span><span data-sync-text>尚未连接云端</span></div></div><main class="bd-main"><header class="bd-top"><div><div class="bd-top__date"></div><h1>今日</h1></div><div class="bd-top__actions"><button class="bd-host-close" data-action="close-host" aria-label="返回思源" hidden>${icon('arrow')}</button><button class="bd-list-toggle" data-action="list-navigation" aria-label="选择待办单" aria-expanded="false">${icon('folder')}</button><button class="bd-nav-toggle" data-action="navigation" aria-label="展开导航" aria-expanded="false">${icon('list')}</button><button class="bd-series-recovery-button" data-action="inspect-series-migrations" aria-label="核查未完成的系列调整" title="核查未完成的系列调整">${icon('important')}</button><button data-action="refresh" aria-label="刷新便单" title="刷新便单">${icon('refresh')}</button></div></header><div class="bd-feedback" role="status" hidden></div><div class="bd-body"></div></main><button class="bd-fab" data-action="new-task" aria-label="新建待办" title="新建待办">${icon('plus')}</button><aside class="bd-editor" aria-label="待办编辑" tabindex="-1" hidden></aside></div>`;
   const root = host.querySelector('.bd-app');
   const body = root.querySelector('.bd-body');
   const listHost = root.querySelector('.bd-lists__items');
   const feedback = root.querySelector('.bd-feedback');
   const editor = root.querySelector('.bd-editor');
+  const adaptive=mountAdaptiveShell(root,host,{...options,onModeChange:()=>{if(ready)render();}});
+  const authorization=mountAuthorizationPrompt(root,{...options,onConnected:()=>refresh(),onError:()=>notify('授权尚未完成，请重新打开授权页后重试。',true)});
   let snapshot = emptySnapshot(), ready = false, disposed = false, loading = false, stale = false, syncing=false,viewUpdatePending=false;
   let generation = 0, view = 'day', listFilter = 'all', selectedDate = today(), month = today().slice(0,7);
   let writeBusy = false, editorOpen = false, feedbackMessage = '', statusFilter='pending';
@@ -132,7 +136,7 @@ export function mountBiandanApp(host, options = {}) {
     ++seriesMarkerGeneration;affectedSeriesTask=null;seriesMarkerKnown=typeof options.onSeriesAffectedTask!=='function';
     ready=false;stale=false;syncing=false;viewUpdatePending=false;snapshot=emptySnapshot();listFilter='all';
     timer.running=false;timer.deadline=0;timer.startedAt=0;timer.elapsed=0;timer.remaining=timer.minutes*60;timer.related='';timer.saved=false;
-    disposeSeriesState();disposeAttachments();subplanDraft=null;collapsedSubplans.clear();editorOpen=false;editorTarget=null;deletePreview=null;editorDirty=false;++editorGeneration;editor.hidden=true;editor.replaceChildren();root.classList.remove('bd-app--editor-open');
+    authorization.clear();adaptive.closeDrawer(false);disposeSeriesState();disposeAttachments();subplanDraft=null;collapsedSubplans.clear();editorOpen=false;editorTarget=null;deletePreview=null;editorDirty=false;++editorGeneration;editor.hidden=true;editor.replaceChildren();root.classList.remove('bd-app--editor-open');
   }
   function controls() {
     root.querySelectorAll('[data-action="new-task"],[data-action="new-list"],[data-action="complete"],[data-action="edit-task"],[data-action="delete-task"],[data-action="edit-list"],[data-action="delete-list"]').forEach(button => button.disabled = !ready || writeBusy||viewUpdatePending||Boolean(seriesPreview));
@@ -143,7 +147,7 @@ export function mountBiandanApp(host, options = {}) {
     root.querySelectorAll('[data-action="inspect-series-migrations"]').forEach(button=>button.disabled=!ready||writeBusy||Boolean(seriesPreview&&seriesPreview.status!=='error'));
     const recoveryButton=root.querySelector('.bd-series-recovery-button');if(recoveryButton)recoveryButton.hidden=typeof options.onSeriesPending!=='function';
     root.setAttribute('aria-busy',String(loading||writeBusy));
-    root.querySelectorAll('[draggable]').forEach(card=>card.setAttribute('draggable',String(ready&&!writeBusy&&!viewUpdatePending&&!seriesPreview)));
+    root.querySelectorAll('[draggable]').forEach(card=>card.setAttribute('draggable',String(ready&&!writeBusy&&!viewUpdatePending&&!seriesPreview&&!adaptive.touchOnly())));
     root.querySelector('[data-action="refresh"]').disabled = loading || syncing || writeBusy||Boolean(seriesPreview);
     root.querySelectorAll('[data-action="connect"]').forEach(button=>button.disabled=loading||writeBusy||Boolean(seriesPreview));
     root.querySelector('[data-sync-text]').textContent = loading||syncing ? ready?'正在同步 · 保留当前内容':'正在读取便单…' : ready ? stale?'刷新失败 · 显示上次读取':'便单云端 · 已读取' : '尚未连接云端';
@@ -172,7 +176,7 @@ export function mountBiandanApp(host, options = {}) {
     const urgency = Number(task.isImportant)===1 && Number(task.isUrgency)===1;
     const content=remarkOf(task), draggable=view==='quadrant';
     const completeControl=item.stateLocked?`<span class="bd-task__state-unknown" aria-label="完成状态待核查">${icon('important')}</span>`:`<button class="bd-task__check" data-action="complete" data-id="${escape(item.id)}" aria-label="${item.done?'撤销完成':'完成'}：${escape(item.title)}" aria-pressed="${item.done}" ${writeBusy?'disabled':''}>${item.done?icon('check'):''}</button>`;
-    return `<article class="bd-task ${item.done&&!item.stateLocked?'bd-task--done':''}" data-occurrence="${escape(item.id)}" ${draggable?`draggable="${!writeBusy}"`:''}>${draggable?`<button class="bd-task__drag" data-action="move-task" data-id="${escape(item.id)}" aria-label="移动待办：${escape(item.title)}" title="拖到另一象限；也可点击后选择象限">${icon('grip')}</button>`:''}${completeControl}<div class="bd-task__content"><button class="bd-task__title" data-action="edit-task" data-id="${escape(item.id)}" title="编辑待办">${escape(item.title)}</button><div class="bd-task__meta">${urgency?'<span class="bd-urgent">重要且紧急</span>':Number(task.isImportant)===1?'<span class="bd-important">重要</span>':''}${Number(task.isCollectible)===1?`<span title="已收藏">${icon('star')}</span>`:''}<span>${escape(time)}</span></div>${content?`<div class="bd-task__note bd-markdown">${renderSafeMarkdown(doc,content,options.renderMarkdown)}</div>`:''}${taskAttachments(item)}${cardSubplans(item)}</div><div class="bd-task__actions"><button data-action="edit-task" data-id="${escape(item.id)}" aria-label="编辑待办：${escape(item.title)}" title="编辑">${icon('edit')}</button><button data-action="delete-task" data-id="${escape(item.id)}" aria-label="删除待办：${escape(item.title)}" title="删除">${icon('trash')}</button></div></article>`;
+    return `<article class="bd-task ${item.done&&!item.stateLocked?'bd-task--done':''}" data-occurrence="${escape(item.id)}" ${draggable?`draggable="${!writeBusy&&!adaptive.touchOnly()}"`:''}>${draggable?`<button class="bd-task__drag" data-action="move-task" data-id="${escape(item.id)}" aria-label="移动待办：${escape(item.title)}" title="${adaptive.touchOnly()?'点击后选择象限':'拖到另一象限；也可点击后选择象限'}">${icon('grip')}</button>`:''}${completeControl}<div class="bd-task__content"><button class="bd-task__title" data-action="edit-task" data-id="${escape(item.id)}" title="编辑待办">${escape(item.title)}</button><div class="bd-task__meta">${urgency?'<span class="bd-urgent">重要且紧急</span>':Number(task.isImportant)===1?'<span class="bd-important">重要</span>':''}${Number(task.isCollectible)===1?`<span title="已收藏">${icon('star')}</span>`:''}<span>${escape(time)}</span></div>${content?`<div class="bd-task__note bd-markdown">${renderSafeMarkdown(doc,content,options.renderMarkdown)}</div>`:''}${taskAttachments(item)}${cardSubplans(item)}</div><div class="bd-task__actions"><button data-action="edit-task" data-id="${escape(item.id)}" aria-label="编辑待办：${escape(item.title)}" title="编辑">${icon('edit')}</button><button data-action="delete-task" data-id="${escape(item.id)}" aria-label="删除待办：${escape(item.title)}" title="删除">${icon('trash')}</button></div></article>`;
   }
   function subplanState(item) {
     const state=inspectSubtasks(item.task,item.instance);
@@ -218,7 +222,7 @@ export function mountBiandanApp(host, options = {}) {
     return `<section class="bd-calendar"><header><h2>${year}<span> / </span>${String(mon).padStart(2,'0')}</h2><div><button data-action="month-prev" aria-label="上个月">${icon('arrow')}</button><button data-action="today">今天</button><button data-action="month-next" aria-label="下个月">${icon('arrow')}</button></div></header><div class="bd-calendar__week">${['一','二','三','四','五','六','日'].map(day=>`<span>周${day}</span>`).join('')}</div><div class="bd-calendar__grid">${cells.join('')}</div></section><section class="bd-day-agenda"><h2>${escape(selectedDate)} 的安排</h2>${taskGroups(items.filter(item=>Number(item.task.haveNoTime)!==1&&onDate(item,selectedDate)))}</section>`;
   }
   function quadrants(items) {
-    return `<p class="bd-quadrant-help">拖动待办到另一象限，或点击拖动手柄选择象限。修改会同步该待办的所有执行实例。</p><div class="bd-quadrants">${quadrantDefinitions.map(([label,key,color])=>{const rows=items.filter(item=>(item.stateLocked||!item.done)&&`${Number(item.task.isImportant)===1?1:0}:${Number(item.task.isUrgency)===1?1:0}`===key);return `<section class="bd-quadrant bd-quadrant--${color}" data-quadrant="${key}" aria-label="${label}"><header><h2>${label}</h2><span>${rows.some(item=>item.stateLocked)?'含待核查':rows.length}</span></header>${rows.length?rows.map(taskRow).join(''):'<p class="bd-quiet">可将待办拖到这里。</p>'}</section>`;}).join('')}</div>`;
+    return `<p class="bd-quadrant-help">${adaptive.touchOnly()?'点击待办的移动按钮，再选择目标象限。':'拖动待办到另一象限，或点击拖动手柄选择象限。'}修改会同步该待办的所有执行实例。</p><div class="bd-quadrants">${quadrantDefinitions.map(([label,key,color])=>{const rows=items.filter(item=>(item.stateLocked||!item.done)&&`${Number(item.task.isImportant)===1?1:0}:${Number(item.task.isUrgency)===1?1:0}`===key);return `<section class="bd-quadrant bd-quadrant--${color}" data-quadrant="${key}" aria-label="${label}"><header><h2>${label}</h2><span>${rows.some(item=>item.stateLocked)?'含待核查':rows.length}</span></header>${rows.length?rows.map(taskRow).join(''):`<p class="bd-quiet">${adaptive.touchOnly()?'可通过移动按钮安排到这里。':'可将待办拖到这里。'}</p>`}</section>`;}).join('')}</div>`;
   }
   function habits(items) {
     const habitIDs=[...new Set(items.filter(item=>Number(item.task.isLoop)>=2).map(item=>id(item.task.id1)))];
@@ -310,7 +314,7 @@ export function mountBiandanApp(host, options = {}) {
     uploadAbort?.abort();uploadAbort=null;uploading=false;attachmentDraft?.dispose();attachmentDraft=null;attachmentInvalid=false;nativeAttachmentCount=0;closeAttachmentPreview();
   }
   function attachmentSection() {
-    return `<section class="bd-attachments" data-attachment-zone aria-label="附件与图片"><header><h3>${icon('attachment')}附件与图片</h3><button type="button" data-action="choose-attachments" ${attachmentInvalid?'disabled':''}>${icon('plus')}添加</button></header><input type="file" name="attachmentFiles" accept="${escape(ATTACHMENT_ACCEPT)}" multiple hidden ${attachmentInvalid?'disabled':''}><p class="bd-attachment-scope">保存到当前思源工作区；便单其他端不会同步文件内容。</p>${attachmentInvalid?'<p class="bd-form-error">附件记录格式尚未确认，备注与附件保持原样；仍可修改其他属性。</p>':`<p class="bd-attachment-hint">选择文件，或在此粘贴、拖入图片。最多 ${MAX_ATTACHMENT_COUNT} 个，每个不超过 ${formatBytes(MAX_ATTACHMENT_BYTES)}。</p>`}<div class="bd-attachment-list" data-attachment-list></div><button type="button" class="bd-upload-cancel" data-action="cancel-upload" hidden>取消上传</button>${nativeAttachmentCount?`<p class="bd-form-hint">已有 ${nativeAttachmentCount} 个便单附件，原引用会保留。</p>`:''}<p class="bd-attachment-hint">移除关联在保存后生效，已经上传的文件仍保留在思源中。</p></section>`;
+    return `<section class="bd-attachments" data-attachment-zone aria-label="附件与图片"><header><h3>${icon('attachment')}附件与图片</h3><span class="bd-attachment-pickers"><button type="button" class="bd-images-picker" data-action="choose-images" ${attachmentInvalid?'disabled':''}>${icon('plus')}照片</button><button type="button" data-action="choose-attachments" ${attachmentInvalid?'disabled':''}>${icon('attachment')}文件</button></span></header><input type="file" name="attachmentImages" accept="image/png,image/jpeg,image/gif,image/webp" multiple hidden ${attachmentInvalid?'disabled':''}><input type="file" name="attachmentFiles" accept="${escape(ATTACHMENT_ACCEPT)}" multiple hidden ${attachmentInvalid?'disabled':''}><p class="bd-attachment-scope">保存到当前思源工作区；便单其他端不会同步文件内容。</p>${attachmentInvalid?'<p class="bd-form-error">附件记录格式尚未确认，备注与附件保持原样；仍可修改其他属性。</p>':`<p class="bd-attachment-hint">选择文件，或在此粘贴、拖入图片。最多 ${MAX_ATTACHMENT_COUNT} 个，每个不超过 ${formatBytes(MAX_ATTACHMENT_BYTES)}。</p>`}<div class="bd-attachment-list" data-attachment-list></div><button type="button" class="bd-upload-cancel" data-action="cancel-upload" hidden>取消上传</button>${nativeAttachmentCount?`<p class="bd-form-hint">已有 ${nativeAttachmentCount} 个便单附件，原引用会保留。</p>`:''}<p class="bd-attachment-hint">移除关联在保存后生效，已经上传的文件仍保留在思源中。</p></section>`;
   }
   function renderAttachments() {
     const list=editor.querySelector('[data-attachment-list]');if(!list)return;
@@ -320,7 +324,7 @@ export function mountBiandanApp(host, options = {}) {
       return `<div class="bd-attachment" data-attachment-key="${escape(entry.key)}"><button type="button" class="bd-attachment__preview" data-action="preview-attachment" data-attachment-key="${escape(entry.key)}" aria-label="预览附件：${escape(metadata.name)}">${preview?`<img src="${escape(preview)}" alt="">`:icon('file')}</button><div class="bd-attachment__info"><strong>${escape(metadata.name)}</strong><span>${formatBytes(metadata.size)} · ${state}</span></div><button type="button" class="bd-attachment__remove" data-action="remove-attachment" data-attachment-key="${escape(entry.key)}" aria-label="移除关联：${escape(metadata.name)}" title="保存后取消关联" ${writeBusy||editorTaskLocked()?'disabled':''}>${icon('close')}</button></div>`;
     }).join(''));
     const cancel=editor.querySelector('[data-action="cancel-upload"]');if(cancel){cancel.hidden=!uploading;cancel.disabled=false;}
-    const choose=editor.querySelector('[data-action="choose-attachments"]');if(choose)choose.disabled=attachmentInvalid||writeBusy||Boolean(seriesPreview)||editorTaskLocked()||rows.length>=MAX_ATTACHMENT_COUNT;
+    for(const choose of editor.querySelectorAll('[data-action="choose-attachments"],[data-action="choose-images"]'))choose.disabled=attachmentInvalid||writeBusy||Boolean(seriesPreview)||editorTaskLocked()||rows.length>=MAX_ATTACHMENT_COUNT;
   }
   function attachmentError(message) {
     const error=editor.querySelector('.bd-form-error[role="alert"]');if(error){error.textContent=message;error.hidden=!message;}
@@ -376,7 +380,8 @@ export function mountBiandanApp(host, options = {}) {
     if(!ready||writeBusy)return false;
     if(seriesPreview){seriesPreview.box?.querySelector('button')?.focus();return false;}
     if(editorOpen&&editorDirty&&!win.confirm('放弃当前尚未保存的修改，打开另一项？'))return false;
-    if(!editorOpen)focusBeforeEditor=doc.activeElement;
+    adaptive.closeDrawer(false);
+    if(!editorOpen)focusBeforeEditor=doc.activeElement?.closest?.('.bd-nav,.bd-lists')?root.querySelector('[data-action="navigation"]'):doc.activeElement;
     disposeAttachments();subplanDraft=null;
     editorOpen=true;editorTarget=target;deletePreview=null;editorDirty=false;++editorGeneration;editor.hidden=false;root.classList.add('bd-app--editor-open');editor.setAttribute('aria-label',title);
     editor.innerHTML=`<header><h2>${escape(title)}</h2><span class="bd-editor-header-actions">${typeof options.onSeriesPending==='function'?`<button type="button" data-action="inspect-series-migrations" aria-label="核查系列调整" title="核查未完成的系列调整">${icon('important')}</button>`:''}<button data-action="close-editor" aria-label="关闭编辑">${icon('close')}</button></span></header>`;
@@ -626,18 +631,21 @@ export function mountBiandanApp(host, options = {}) {
     if(event.target.classList?.contains('bd-series-recovery-layer')){closeSeriesRecovery();return;}
     if(event.target.classList?.contains('bd-attachment-preview')){closeAttachmentPreview();return;}
     const button=event.target.closest?.('button');if(!button||!root.contains(button)||button.disabled)return;
-    if(button.dataset.view){view=button.dataset.view;root.classList.remove('bd-app--nav-open');render();return;}
-    if(button.dataset.list){listFilter=button.dataset.list;render();return;}
+    if(button.dataset.view){view=button.dataset.view;adaptive.closeDrawer(false);render();return;}
+    if(button.dataset.list){listFilter=button.dataset.list;adaptive.closeDrawer();render();return;}
     if(button.dataset.date){selectedDate=button.dataset.date;month=selectedDate.slice(0,7);render();return;}
     const action=button.dataset.action;
     if((writeBusy||viewUpdatePending||seriesPreview)&&['new-task','new-list','edit-task','edit-list','delete-task','delete-list','complete','complete-subplan','move-task','add-subplan','remove-subplan'].includes(action)||writeBusy&&['close-editor','refresh'].includes(action))return;
     if(writeBusy&&action?.startsWith('focus-'))return;
-    if(action==='navigation'){const open=root.classList.toggle('bd-app--nav-open');button.setAttribute('aria-expanded',String(open));return;}
+    if(action==='navigation'||action==='list-navigation'){adaptive.toggleDrawer(action==='navigation'?'navigation':'lists');return;}
+    if(action==='close-drawer'){adaptive.closeDrawer();return;}
+    if(action==='close-host'){if(writeBusy)return;if(editorOpen){closeEditor();return;}if(typeof options.onClose==='function')await options.onClose();return;}
     if(action==='refresh')return refresh();
     if(action==='settings')return options.onOpenSettings?.();
     if(action==='connect'){
+      adaptive.closeDrawer(false);
       if(loading)return;loading=true;controls();notify('请在授权窗口完成账号连接。');
-      try{await options.connect?.();if(!disposed)await refresh();}catch(error){if(!disposed)notify(error?.message||'连接尚未完成，请重试。',true);}finally{loading=false;if(!disposed)controls();}return;
+      try{const result=await options.connect?.();if(!disposed){if(result?.pending===true)authorization.open(result);else await refresh();}}catch(error){if(!disposed)notify(adaptive.touchOnly()?'授权页未能打开，请检查系统浏览器后重试。':error?.message||'连接尚未完成，请重试。',true);}finally{loading=false;if(!disposed)controls();}return;
     }
     if(action==='new-task')return openEditor('task');
     if(action==='new-list')return openEditor('list');
@@ -656,7 +664,7 @@ export function mountBiandanApp(host, options = {}) {
       subplanDraft.items.splice(index,1);editorDirty=true;subplanError('');renderSubplanDraft();
       const fields=[...editor.querySelectorAll('[name="subplan-name"]')];(fields[Math.min(index,fields.length-1)]||editor.querySelector('[name="subplan-title"]'))?.focus();return;
     }
-    if(action==='choose-attachments'){if(!writeBusy&&!attachmentInvalid&&!editorTaskLocked())editor.querySelector('[name="attachmentFiles"]')?.click();return;}
+    if(action==='choose-attachments'||action==='choose-images'){if(!writeBusy&&!attachmentInvalid&&!editorTaskLocked())editor.querySelector(action==='choose-images'?'[name="attachmentImages"]':'[name="attachmentFiles"]')?.click();return;}
     if(action==='cancel-upload'){uploadAbort?.abort();return;}
     if(action==='close-attachment-preview'){closeAttachmentPreview();return;}
     if(action==='remove-attachment'){
@@ -710,7 +718,7 @@ export function mountBiandanApp(host, options = {}) {
   }
   function change(event) {
     if(seriesPreview&&!writeBusy&&editor.contains(event.target)){cancelSeriesPreview();notify('草稿已变化，请重新预览整个系列。',true);}
-    if(event.target.name==='attachmentFiles'){stageAttachments(event.target.files);event.target.value='';return;}
+    if(['attachmentFiles','attachmentImages'].includes(event.target.name)){stageAttachments(event.target.files);event.target.value='';return;}
     if(editor.contains(event.target))editorDirty=true;
     if(writeBusy&&event.target.name?.startsWith('focus-'))return;
     if(event.target.name==='status-filter'){
@@ -739,6 +747,7 @@ export function mountBiandanApp(host, options = {}) {
   }
   function keydown(event) {
     activity();
+    if(adaptive.keydown(event))return;
     if(recoveryState){
       if(event.key==='Escape'){event.preventDefault();closeSeriesRecovery();return;}
       if(event.key==='Tab'){
@@ -759,7 +768,7 @@ export function mountBiandanApp(host, options = {}) {
   }
   function dragStart(event) {
     activity();
-    const card=event.target.closest?.('[data-occurrence][draggable]');if(!card||writeBusy||!ready||view!=='quadrant'){event.preventDefault();return;}
+    const card=event.target.closest?.('[data-occurrence][draggable]');if(!card||writeBusy||!ready||view!=='quadrant'||adaptive.touchOnly()){event.preventDefault();return;}
     const action=event.target.closest?.('button');if(action&&action.dataset.action!=='move-task'){event.preventDefault();return;}
     draggingId=card.dataset.occurrence;card.classList.add('bd-task--dragging');
     if(event.dataTransfer){event.dataTransfer.effectAllowed='move';event.dataTransfer.setData('application/x-biandan-occurrence',draggingId);event.dataTransfer.setData('text/plain','biandan:'+draggingId);}
@@ -807,5 +816,6 @@ export function mountBiandanApp(host, options = {}) {
   const unsubscribe=typeof options.subscribeSnapshots==='function'?options.subscribeSnapshots(receiveSnapshot):null;
   void refreshSeriesMarker();
   void refresh({force:false});
-  return {refresh,applySnapshot,isInteracting:()=>writeBusy||editorOpen||Boolean(draggingId)||Boolean(seriesPreview)||Boolean(recoveryState)||Boolean(root.querySelector('.bd-attachment-preview')),dispose(){if(disposed)return;disposed=true;++generation;++editorGeneration;++seriesMarkerGeneration;subplanDraft=null;disposeSeriesState();disposeAttachments();win.clearInterval(interval);if(typeof unsubscribe==='function')unsubscribe();for(const [name,listener]of Object.entries(listeners))root.removeEventListener(name,listener,name==='scroll'||name==='toggle');root.remove();if(!hadHostClass)host.classList.remove('bd-plugin-host');}};
+  void authorization.restore();
+  return {refresh,applySnapshot,isInteracting:()=>adaptive.isOpen()||authorization.isOpen()||writeBusy||editorOpen||Boolean(draggingId)||Boolean(seriesPreview)||Boolean(recoveryState)||Boolean(root.querySelector('.bd-attachment-preview')),dispose(){if(disposed)return;disposed=true;adaptive.dispose();authorization.dispose();++generation;++editorGeneration;++seriesMarkerGeneration;subplanDraft=null;disposeSeriesState();disposeAttachments();win.clearInterval(interval);if(typeof unsubscribe==='function')unsubscribe();for(const [name,listener]of Object.entries(listeners))root.removeEventListener(name,listener,name==='scroll'||name==='toggle');root.remove();if(!hadHostClass)host.classList.remove('bd-plugin-host');}};
 }

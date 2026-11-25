@@ -2,8 +2,10 @@
 
 English | [简体中文](README.zh-CN.md)
 
-Manage your authorized Biandan cloud tasks in a SiYuan desktop document tab.
-Version **0.3.3** packages the existing 0.3.2 features for the community marketplace.
+Manage your authorized Biandan cloud tasks in SiYuan.
+Version **0.4.0-rc.2** is a mobile candidate for Android, iOS and the HarmonyOS
+edition of SiYuan, pending real-device functional acceptance.
+The previous stable release is 0.3.3; this version retains its candidate status.
 No separate MCP server is required. This is an independent third-party client,
 not an official Biandan or Huawei product, and not a native HarmonyOS application.
 
@@ -25,26 +27,64 @@ not an official Biandan or Huawei product, and not a native HarmonyOS applicatio
 
 Search for **Biandan Companion** / **便单伴侣** in SiYuan's desktop marketplace,
 install and enable it, then open the top-bar entry and choose Connect.
-While the first submission is under review, download `package.zip` from
+For local installation, download the selected version's `package.zip` from
 [GitHub Releases](https://github.com/ShiShiBits1/siyuan-biandan/releases)
 and use SiYuan's local plugin installation.
 
-Authorize access on the Huawei page opened by the plugin. The temporary OAuth
+On desktop, authorize access on the Huawei page opened by the plugin. The temporary OAuth
 callback listens only on `127.0.0.1:42681` and closes on completion or timeout.
 Do not run another authorization process using that callback simultaneously.
 
-Minimum SiYuan: **3.8.9**. Native acceptance was performed on **Windows / 3.8.11**.
+Minimum SiYuan for this candidate: **3.8.11**. Prior native acceptance was performed on **Windows / 3.8.11**.
 macOS and Linux desktop backends are declared but have not received real-device
-acceptance in this project. System secure storage is required. Browser frontends,
-mobile devices, native HarmonyOS and SiYuan publish pages are not supported.
+acceptance in this project. Desktop authorization requires system secure storage.
+Android, iOS and HarmonyOS SiYuan support is implemented as a candidate and still
+requires real-device functional acceptance. The publisher has confirmed additional
+authorization to adapt and distribute this plugin for HarmonyOS SiYuan; see the
+third-party notices. It runs as web code inside SiYuan, rather than a separate
+HarmonyOS native application or HAP. Browser frontends and SiYuan publish pages
+are outside this release scope.
+
+### Mobile candidate
+
+Open Biandan Companion from SiYuan's plugin toolbar/menu to use its full-screen
+mobile page. Navigation and lists use drawers; editors fit narrow screens and
+the on-screen keyboard. Priority quadrants offer an explicit Move action for
+touch devices. Native Back/Close protects an open editor or active operation;
+save or cancel that operation first.
+
+Each mobile device connects separately. Choose Connect, complete Huawei login
+in the system browser, and copy the browser's final local callback address back
+into the plugin. The official relay targets `127.0.0.1:42681`; a phone may display
+a connection error at that final address. Paste the full address locally into
+the authorization form within five minutes. Do not send that address to anyone.
+There is no automatic app return or mobile loopback server. Whether the final
+address remains accessible in the device's system browser is pending real-device
+acceptance; cancel and start again if the browser cannot provide it.
+
+Mobile requests use SiYuan's kernel proxy, with fixed HTTPS destinations and no
+redirect following. Refresh credentials and the pending authorization attempt
+are encrypted in device-local IndexedDB with a non-extractable WebCrypto key.
+They do not use or replace the desktop authorization file and do not sync with
+the workspace. This is WebView storage, not a hardware-backed OS keychain.
+Missing crypto/storage support stops authorization; there is no plaintext fallback.
+Clearing application/site data or changing the WebView origin requires a fresh
+connection. Attachment preview/opening uses the native mobile link handler;
+file picking and external viewers still need real-device acceptance on each mobile platform.
+
+This revision fixes local package compatibility on HarmonyOS SiYuan. The previous
+candidate omitted the `harmony` backend. SiYuan 3.8.12 can display a minimum-version
+message for a platform incompatibility, even when its version is already newer.
+The minimum stays at 3.8.11; this change does not bypass that requirement.
 
 ## Data and limits
 
 Biandan cloud remains the task source; no second SiYuan task database is created.
 The plugin uses documented Huawei OAuth/cloud-sync services and Biandan's
 renewal service, with no developer-operated task backend. Access tokens stay in
-memory. Refresh credentials are encrypted using system secure storage before
-being saved in the local plugin's private state.
+memory. On desktop, refresh credentials are encrypted using system secure storage
+before being saved in the local plugin's private state. Mobile uses the separate
+device-local encrypted storage and manual callback flow described above.
 
 Choose an **attachment notebook** in settings before uploading. Files are saved
 to your SiYuan workspace and indexed by a native document; task notes contain

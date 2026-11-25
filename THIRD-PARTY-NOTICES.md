@@ -11,6 +11,17 @@ The independently authored plugin source and documentation are licensed under
 the MIT License in LICENSE. This license does not grant rights to third-party
 trademarks, service names or artwork.
 
+## HarmonyOS SiYuan plugin authorization
+
+The public Biandan permission document excludes HarmonyOS clients and
+HarmonyOS-targeted packages. On 2026-11-25, the publisher explicitly confirmed
+obtaining additional permission from the Biandan team to adapt and publish this
+plugin for the HarmonyOS edition of SiYuan. HarmonyOS support relies on that
+publisher-confirmed additional authorization, not an expansion of the general
+public permission. It covers this SiYuan plugin; it does not grant rights to
+the Biandan native application, its source code, or unrelated assets. The
+plugin remains an independent third-party product.
+
 ## Supplied Biandan artwork
 
 The supplied artwork used by icon.png and the corresponding application header
