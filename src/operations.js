@@ -183,49 +183,153 @@ export function updateList(client,listRecord,patch,{expectedVersion} = {}) {
   });
 }
 
-export async function previewTaskDeletion(client,parentRecord,occurrenceRecord,{expectedTaskVersion,expectedOccurrenceVersion} = {}) {
-  const [parent,occurrence] = await Promise.all([
-    fresh(client,'Task',parentRecord,expectedTaskVersion),
-    fresh(client,'showTask',occurrenceRecord,expectedOccurrenceVersion),
-  ]);
-  const taskId = businessID(attributes(parent).id1);
-  if (businessID(attributes(occurrence).id1) !== taskId) throw new Error('执行实例不属于所选待办，请刷新核查');
-  const siblings = (await client.list('showTask')).filter(row => businessID(attributes(row).id1) === taskId);
-  if (siblings.filter(row => row.id === occurrence.id && businessID(attributes(row).id2) === businessID(attributes(occurrence).id2)).length !== 1) throw new Error('所选执行实例未唯一同步，已停止删除');
-  const repeating = number(attributes(parent).isLoop) > 0 || number(attributes(parent).loopSet) > 0;
-  if (!repeating && (siblings.length !== 1 || siblings[0].id !== occurrence.id)) throw new Error('一次性待办包含额外实例，不能按当前范围删除，请在便单客户端核查');
-  const scope = repeating ? 'occurrence' : 'one-off';
-  const state = [scope,recordIdentity(parent),recordIdentity(occurrence),sortedIdentities(siblings)];
-  return {kind:'task-delete',scope,title:String(attributes(parent).taskTitle || '未命名待办'),taskId,occurrenceId:businessID(attributes(occurrence).id2),taskRecordId:parent.id,occurrenceRecordId:occurrence.id,occurrenceCount:1,deletesTaskDefinition:!repeating,fingerprint:await signature(state)};
+const deletionScopes = new Set(['occurrence','future_pending','series']);
+const canonicalDeletionValue = value => Array.isArray(value) ? value.map(canonicalDeletionValue) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonicalDeletionValue(value[key])])) : value;
+const deletionRecord = row => [String(row.id),String(row.version),attributes(row)];
+const sortedDeletionRecords = rows => rows.map(deletionRecord).sort((left,right)=>left[0].localeCompare(right[0]));
+const deletionHash = value => signature(canonicalDeletionValue(value));
+const unsignedDeletionPlan = plan => Object.fromEntries(Object.entries(plan).filter(([key])=>key!=='fingerprint'));
+export async function verifyTaskDeletionPlan(plan) {
+  if (!plan || !['task-delete','task-delete-group'].includes(plan.kind) || typeof plan.fingerprint !== 'string' || await deletionHash(unsignedDeletionPlan(plan)) !== plan.fingerprint) throw conflict();
 }
-
-export function deleteTask(client,parentRecord,occurrenceRecord,{preview,expectedTaskVersion,expectedOccurrenceVersion} = {}) {
-  return serializeBiandanWrite(client,async () => {
-    const plan = await previewTaskDeletion(client,parentRecord,occurrenceRecord,{expectedTaskVersion,expectedOccurrenceVersion});
-    verifyPreview(preview,plan,'task-delete');
-    // Fresh reads above ensure the confirmation still refers to the same
-    // records, versions and complete sibling set before the first write.
-    const parent = await fresh(client,'Task',parentRecord,expectedTaskVersion);
-    const occurrence = await fresh(client,'showTask',occurrenceRecord,expectedOccurrenceVersion);
-    let removedOccurrences = 0;
-    try {
-      await client.remove('showTask',occurrence.id,occurrence.version);removedOccurrences++;
-      const remaining = (await client.list('showTask')).filter(row => businessID(attributes(row).id1) === plan.taskId);
-      if (remaining.some(row => row.id === occurrence.id)) throw new Error('实例删除尚未确认');
-      if (plan.deletesTaskDefinition) {
-        if (remaining.length) throw new Error('删除期间出现了其他实例，已保留父任务');
-        await client.remove('Task',parent.id,parent.version);
-        if ((await client.list('Task')).some(row => row.id === parent.id || businessID(attributes(row).id1) === plan.taskId)) throw new Error('父任务删除尚未确认');
-      } else {
-        const summary = remaining.length && !remaining.some(row => number(attributes(row).isFinish) === 0 && number(attributes(row).completedCount) >= 0) ? 1 : 0;
-        const current = await client.get('Task',parent.id);
-        if (String(current.version) !== String(parent.version)) throw conflict();
-        if (number(attributes(current).isFinish) !== summary) await client.update('Task',parent.id,parent.version,{isFinish:summary});
-      }
-      return {...plan,deleted:true};
-    } catch (error) {
-      throw uncertain(error,'删除操作尚待核查，可能已删除本次实例；请刷新后核对，不会自动重复删除',{removedOccurrences});
+export function taskDeletionCutoff(scope,fromDate,cutoff) {
+  if (!deletionScopes.has(scope)) throw new Error('请选择本次、指定日期起未完成或整个系列的删除范围');
+  if (scope !== 'future_pending') {
+    if (fromDate !== undefined && fromDate !== null) throw new Error('起始日期仅适用于指定日期起删除');
+    return null;
+  }
+  if (fromDate !== undefined && fromDate !== null) {
+    if (!date(fromDate)) throw new Error('请选择有效的删除起始日期');
+    return {date:fromDate,time:'00:00:00'};
+  }
+  if (cutoff) {
+    if (!date(cutoff.date) || clock(cutoff.time) !== cutoff.time) throw new Error('删除预览的截止时刻无效');
+    return {date:cutoff.date,time:cutoff.time};
+  }
+  const now=new Date(),pad=value=>String(value).padStart(2,'0');
+  return {date:`${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`,time:`${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`};
+}
+function deletionTargets(targets) {
+  if (!Array.isArray(targets) || !targets.length) throw new Error('请选择需要删除的待办');
+  const parentId=identity(targets[0]?.parentRecord);
+  for (const target of targets) {
+    if (!target || identity(target.parentRecord)!==parentId) throw new Error('同一删除计划只能包含一个父待办');
+    if ((target.expectedTaskVersion??target.parentRecord?.version)===undefined) throw new Error('删除前请读取父待办版本');
+  }
+  return parentId;
+}
+function validateDeletionMembers(rows) {
+  const records=new Set(),business=new Set();
+  for (const row of rows) {
+    const recordId=identity(row),id=businessID(attributes(row).id2);
+    if (!id || id==='0' || row.version===undefined || row.version===null || records.has(recordId) || business.has(id)) throw new Error('执行实例身份重复或无法确认，已停止删除');
+    records.add(recordId);business.add(id);
+  }
+}
+function deletionProgress(row) {
+  const finish=Number(attributes(row).isFinish??0),progress=Number(attributes(row).completedCount??0);
+  if (![0,1].includes(finish) || !Number.isSafeInteger(progress)) throw new Error('执行实例完成状态无法确认，请先核查');
+  return {finish,progress};
+}
+async function uniqueDeletionParent(client,parent,taskId) {
+  const definitions=(await client.list('Task')).filter(row=>businessID(attributes(row).id1)===taskId);
+  if(definitions.length!==1 || definitions[0].id!==parent.id || await deletionHash(deletionRecord(definitions[0]))!==await deletionHash(deletionRecord(parent))) throw conflict();
+}
+async function buildTaskDeletionPlan(client,targets,{scope='occurrence',fromDate,cutoff,legacy=false,kind='task-delete-group'}={}) {
+  deletionTargets(targets);const fixedCutoff=taskDeletionCutoff(scope,fromDate,cutoff);
+  const parent=await fresh(client,'Task',targets[0].parentRecord,targets[0].expectedTaskVersion),taskId=businessID(attributes(parent).id1);
+  await uniqueDeletionParent(client,parent,taskId);
+  const normalizedTargets=[],selectedById=new Map();
+  for (const target of targets) {
+    if (String(target.expectedTaskVersion??target.parentRecord.version)!==String(parent.version) || businessID(attributes(target.parentRecord).id1)!==taskId) throw conflict();
+    let occurrence=null;
+    if (target.occurrenceRecord) {
+      occurrence=await fresh(client,'showTask',target.occurrenceRecord,target.expectedOccurrenceVersion);
+      if (businessID(attributes(occurrence).id1)!==taskId) throw new Error('执行实例不属于所选待办，请刷新核查');
+      selectedById.set(occurrence.id,occurrence);
+    } else if (scope==='occurrence') throw new Error('删除本次待办前请选择具体执行实例');
+    normalizedTargets.push({parentRecord:structuredClone(parent),occurrenceRecord:occurrence?structuredClone(occurrence):null,expectedTaskVersion:parent.version,...(occurrence?{expectedOccurrenceVersion:occurrence.version}:{})});
+  }
+  const siblings=(await client.list('showTask')).filter(row=>businessID(attributes(row).id1)===taskId).sort((left,right)=>String(left.id).localeCompare(String(right.id)));
+  validateDeletionMembers(siblings);
+  for (const occurrence of selectedById.values()) {
+    const member=siblings.find(row=>row.id===occurrence.id && businessID(attributes(row).id2)===businessID(attributes(occurrence).id2));
+    if (!member || String(member.version)!==String(occurrence.version) || await deletionHash(deletionRecord(member))!==await deletionHash(deletionRecord(occurrence))) throw conflict();
+  }
+  const repeating=number(attributes(parent).isLoop)>0 || number(attributes(parent).loopSet)>0;
+  if (scope==='occurrence' && !repeating && (siblings.length!==1 || selectedById.size!==1 || !selectedById.has(siblings[0]?.id))) throw new Error('一次性待办包含额外实例，不能按当前范围删除，请在便单客户端核查');
+  let chosen=scope==='occurrence'?siblings.filter(row=>selectedById.has(row.id)):siblings;
+  if (scope==='future_pending') chosen=siblings.filter(row=>{
+    const {finish}=deletionProgress(row);if (finish)return false;
+    const start=attributes(row).startTime,time=attributes(row).validStartTime??'00:00:00';
+    if (!date(start)) throw new Error('执行实例日期无效，不能确定后续删除范围');
+    const at=clock(time);return start>fixedCutoff.date || start===fixedCutoff.date && at>=fixedCutoff.time;
+  });
+  chosen.sort((left,right)=>String(left.id).localeCompare(String(right.id)));
+  const deletesTaskDefinition=scope==='series' || scope==='occurrence'&&!repeating || scope==='future_pending'&&chosen.length>0&&chosen.length===siblings.length;
+  const first=normalizedTargets.find(target=>target.occurrenceRecord)?.occurrenceRecord;
+  const plan={kind,scope:legacy&&!repeating?'one-off':scope,requestedScope:scope,legacy,fromDate:fromDate??null,cutoff:fixedCutoff,title:String(attributes(parent).taskTitle||'未命名待办'),taskId,taskRecordId:parent.id,occurrenceId:first?businessID(attributes(first).id2):null,occurrenceRecordId:first?.id??null,occurrenceCount:chosen.length,deletesTaskDefinition,abandonedCount:chosen.filter(row=>deletionProgress(row).progress<0).length,keys:chosen.map(row=>businessID(attributes(row).id2)),parentRecord:structuredClone(parent),members:structuredClone(siblings),selected:structuredClone(chosen),targets:normalizedTargets};
+  plan.fingerprint=await deletionHash(plan);return plan;
+}
+/** A single parent plan merges overlapping selected occurrences. Other tables,
+ * attachments, recurrence rules and manual fields are never cleanup targets. */
+export function previewTaskDeletionGroup(client,targets,options={}) {return buildTaskDeletionPlan(client,targets,options);}
+async function checkDeletionState(client,plan,removed) {
+  const parent=await fresh(client,'Task',plan.parentRecord,plan.parentRecord.version);
+  if (await deletionHash(deletionRecord(parent))!==await deletionHash(deletionRecord(plan.parentRecord))) throw conflict();
+  await uniqueDeletionParent(client,parent,plan.taskId);
+  const remaining=(await client.list('showTask')).filter(row=>businessID(attributes(row).id1)===plan.taskId);
+  validateDeletionMembers(remaining);
+  const expected=plan.members.filter(row=>!removed.has(row.id));
+  if (await deletionHash(sortedDeletionRecords(remaining))!==await deletionHash(sortedDeletionRecords(expected))) throw conflict();
+  return {parent,remaining};
+}
+async function executeTaskDeletionPlan(client,plan,{assertTargetAllowed}={}) {
+  // A zero-range future preview is a true no-op, unlike the reference MCP's
+  // optional aggregate reconciliation. No unrelated parent field is rewritten.
+  if (!plan.selected.length && !plan.deletesTaskDefinition) return {...plan,deleted:true,empty:true,removedOccurrences:0,removedTasks:0};
+  const removed=new Set();let removedTasks=0;
+  const guard=async()=>{if(typeof assertTargetAllowed==='function')for(const target of plan.targets)await assertTargetAllowed(target);};
+  await guard();await checkDeletionState(client,plan,removed);
+  try {
+    for (const occurrence of plan.selected) {
+      await guard();await checkDeletionState(client,plan,removed);
+      const current=await fresh(client,'showTask',occurrence,occurrence.version);
+      if (await deletionHash(deletionRecord(current))!==await deletionHash(deletionRecord(occurrence))) throw conflict();
+      await client.remove('showTask',occurrence.id,occurrence.version);removed.add(occurrence.id);
     }
+    await guard();const {parent,remaining}=await checkDeletionState(client,plan,removed);
+    if (plan.deletesTaskDefinition) {
+      if (remaining.length) throw new Error('删除期间出现其他实例，已保留父待办');
+      await client.remove('Task',parent.id,parent.version);removedTasks++;
+      if ((await client.list('Task')).some(row=>row.id===parent.id || businessID(attributes(row).id1)===plan.taskId)) throw new Error('父待办删除结果尚未确认');
+    } else {
+      const summary=remaining.length&&!remaining.some(row=>{const state=deletionProgress(row);return !state.finish&&state.progress>=0;})?1:0;
+      if (number(attributes(parent).isFinish)!==summary) await client.update('Task',parent.id,parent.version,{isFinish:summary});
+    }
+    return {...plan,deleted:true,removedOccurrences:removed.size,removedTasks};
+  } catch (error) {
+    if (!removed.size && !removedTasks && !['unknown','partial'].includes(error.commitState) && error.status>=400 && error.status<500) throw error;
+    throw uncertain(error,'删除结果尚待核查，可能已有部分实例删除；请先刷新核对，不会自动重试',{removedOccurrences:removed.size,removedTasks});
+  }
+}
+export function deleteTaskDeletionGroup(client,preview,{assertTargetAllowed}={}) {
+  return serializeBiandanWrite(client,async()=>{
+    await verifyTaskDeletionPlan(preview);
+    const current=await buildTaskDeletionPlan(client,preview.targets,{scope:preview.requestedScope,fromDate:preview.fromDate,cutoff:preview.cutoff,legacy:preview.legacy,kind:preview.kind});
+    verifyPreview(preview,current,preview.kind);
+    return executeTaskDeletionPlan(client,current,{assertTargetAllowed});
+  });
+}
+export function previewTaskDeletion(client,parentRecord,occurrenceRecord,{expectedTaskVersion,expectedOccurrenceVersion,scope,fromDate}={}) {
+  return buildTaskDeletionPlan(client,[{parentRecord,occurrenceRecord,expectedTaskVersion,expectedOccurrenceVersion}],{scope:scope??'occurrence',fromDate,legacy:scope===undefined,kind:'task-delete'});
+}
+export function deleteTask(client,parentRecord,occurrenceRecord,{preview,expectedTaskVersion,expectedOccurrenceVersion,scope,fromDate,assertTargetAllowed}={}) {
+  return serializeBiandanWrite(client,async()=>{
+    await verifyTaskDeletionPlan(preview);
+    const current=await buildTaskDeletionPlan(client,[{parentRecord,occurrenceRecord,expectedTaskVersion,expectedOccurrenceVersion}],{scope:scope??'occurrence',fromDate,cutoff:preview.cutoff,legacy:scope===undefined,kind:'task-delete'});
+    verifyPreview(preview,current,'task-delete');
+    return executeTaskDeletionPlan(client,current,{assertTargetAllowed});
   });
 }
 

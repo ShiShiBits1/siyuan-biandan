@@ -3,8 +3,9 @@
 English | [简体中文](README.zh-CN.md)
 
 Manage your authorized Biandan cloud tasks in SiYuan.
-Version **0.4.0-rc.2** is a mobile candidate for Android, iOS and the HarmonyOS
-edition of SiYuan, pending real-device functional acceptance.
+Version **0.5.0-rc.1** aligns with the official Biandan MCP **0.4.6** contract,
+adding batched and scoped task deletion plus Biandan 7.1.1 native note styles.
+Android, iOS and HarmonyOS SiYuan remain mobile candidates pending real-device acceptance.
 The previous stable release is 0.3.3; this version retains its candidate status.
 No separate MCP server is required. This is an independent third-party client,
 not an official Biandan or Huawei product, and not a native HarmonyOS application.
@@ -14,13 +15,18 @@ not an official Biandan or Huawei product, and not a native HarmonyOS applicatio
 ## Features
 
 - Today, colored task lists, calendar date selection and draggable priority quadrants.
-- Create/edit one-off tasks, complete an occurrence, and render Markdown notes.
+- Create/edit one-off tasks, complete an occurrence, and render Markdown notes,
+  including Biandan's native bold, italic, underline, strike, preset colors and indentation.
+- Select tasks in All Tasks, preview and confirm deletion of occurrences,
+  unfinished occurrences from a date, or whole series. The complete selection
+  is processed in groups of 20 without a 20-item total limit; overlapping
+  targets from the same task are combined.
 - Up to 20 subplans per task. Preview and confirm whole repeating or habit series
   edits while preserving each occurrence's corresponding checked steps.
 - Stop further series updates, inspect confirmed results and explicitly resume.
   Interrupted series display unverified progress until reconciliation.
 - Choose files, paste/drop images, preview and save to the SiYuan workspace.
-- Focus timer, habit occurrence statistics and explicit focus-record saving.
+- Focus timer with automatic saving at countdown completion, manual saving of paused sessions, and habit occurrence statistics.
 - Immediate verified writes, shared page updates, and merged idle cloud reads.
 
 ## Install and connect
@@ -108,6 +114,28 @@ targets or ambiguous progress are not silently converted. Advanced recurrence
 rules, habit scheduling and native reminder delivery remain with the original
 Biandan client and its device permissions. The preview contains demo data only.
 
+Deletion always previews its actual scope. A future-unfinished range includes
+abandoned occurrences when their completion flag is unset; the preview shows
+that count. A date means inclusive local midnight; without a date, the cutoff
+is fixed at preview time. An empty range makes no writes. Versions and membership
+are rechecked before deletion. Confirmed deletions are retained; uncertain or
+partially committed results stop following groups and require a fresh check.
+Stop skips subsequent tasks after the current task's deletion and verification
+finish. It neither rolls back confirmed work nor interrupts that active group.
+Deleting tasks leaves source attachments and focus history intact.
+
+Native note styles are parsed from a fixed tag/color/indent allowlist. Editing
+and synchronization retain the original note source, subplans, attachment
+references and unknown fields; rendered HTML is never saved back as the note.
+The plugin also retains its previous Markdown links and tables, which other
+Biandan clients may not render identically.
+
+The SiYuan plugin continues to connect directly to Biandan cloud and does not
+depend on a local MCP process. The separate official MCP 0.4.6 service is for
+AI clients. Its cloud, renewal and recurrence transports are unchanged from
+0.4.3; the new batch-delete tool and note-format guidance do not introduce a
+new cloud endpoint.
+
 ## Build
 
 With Node.js 20 or newer, run in the source directory:
@@ -134,3 +162,7 @@ Implemented from the public [Biandan developer documentation](https://gitcode.co
 The native client and MCP server implementation are not distributed.
 
 [Report issues](https://github.com/ShiShiBits1/siyuan-biandan/issues).
+
+## Automatic focus saving
+
+Countdown completion queues one verified save, including while viewing another page in the plugin. It waits for other writes; a failed or uncertain result remains visible for manual inspection rather than repeated automatic requests. Manual retry uses the same frozen record. Paused sessions can still be saved manually. Timing requires the current plugin page to remain running; closing it, exiting SiYuan or mobile OS suspension does not guarantee background timing or saving.

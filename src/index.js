@@ -10,6 +10,7 @@ import {createMobilePage} from './mobile-page.js';
 import {createVerifiedWriter} from './verified-create.js';
 import {createPluginStateReader} from './plugin-state.js';
 import {updateTask,previewTaskDeletion,deleteTask,updateList,previewListDeletion,deleteList} from './operations.js';
+import {previewBatchTaskDeletion,deleteTaskBatch} from './batch-delete.js';
 import {createSyncCoordinator} from './sync-coordinator.js';
 import {createSiyuanAttachmentStore} from './attachments.js';
 import {createSeriesSubplanEditor} from './series-subplans.js';
@@ -111,7 +112,9 @@ export default class BiandanCompanion extends Plugin{
       onReconcileSeries:()=>this.seriesSubplans.reconcile(),
       onResumeSeries:options=>runWrite(()=>this.seriesSubplans.resume(options)),
       onPreviewDeleteTask:async(parent,occurrence,options)=>{assertWrite();await guardSeries(parent);return previewTaskDeletion(this.client,parent,occurrence,options);},
-      onDeleteTask:(parent,occurrence,options)=>runWrite(async()=>{await guardSeries(parent);return deleteTask(this.client,parent,occurrence,options);}),
+      onDeleteTask:(parent,occurrence,options)=>runWrite(async()=>{await guardSeries(parent);return deleteTask(this.client,parent,occurrence,{...options,assertTargetAllowed:target=>guardSeries(target.parentRecord)});}),
+      onPreviewBatchDelete:async(targets,options)=>{assertWrite();return previewBatchTaskDeletion(this.client,targets,{...options,assertTargetAllowed:target=>guardSeries(target.parentRecord)});},
+      onDeleteBatch:(preview,options)=>runWrite(()=>deleteTaskBatch(this.client,preview,{...options,assertTargetAllowed:target=>guardSeries(target.parentRecord)})),
       onEditList:(record,patch,options)=>runWrite(()=>updateList(this.client,record,patch,options)),
       onPreviewDeleteList:async(record,options)=>{assertWrite();await guardSeries(record,true);return previewListDeletion(this.client,record,options);},
       onDeleteList:(record,options)=>runWrite(async()=>{await guardSeries(record,true);return deleteList(this.client,record,options);}),

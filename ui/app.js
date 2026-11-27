@@ -1,6 +1,7 @@
 import {icon} from './icons.js';
 import {mountAdaptiveShell} from './mobile-shell.js';
 import {mountAuthorizationPrompt} from './authorization-prompt.js';
+import {checkedBatchPreview,checkedBatchResult,scopeControls,previewHTML as batchPreviewHTML,resultHTML as batchResultHTML} from './batch-delete-view.js';
 import {brandIcon} from './brand.js';
 import {businessID,decodeContent} from '../src/model.js';
 import {ATTACHMENT_ACCEPT,MAX_ATTACHMENT_COUNT,MAX_ATTACHMENT_BYTES,parseManagedAttachments,getSiyuanAssetURL} from '../src/attachments.js';
@@ -46,12 +47,43 @@ export function mountBiandanApp(host, options = {}) {
   let generation = 0, view = 'day', listFilter = 'all', selectedDate = today(), month = today().slice(0,7);
   let writeBusy = false, editorOpen = false, feedbackMessage = '', statusFilter='pending';
   let editorTarget=null,deletePreview=null,editorGeneration=0,draggingId='',focusBeforeEditor=null,editorDirty=false;
+  let batchMode=false,batchSelection=new Set(),batchState=null,batchAbort=null,deleteRequestOptions={};
   let attachmentDraft=null,attachmentInvalid=false,nativeAttachmentCount=0,uploadAbort=null,uploading=false,attachmentPreviewKey='',previewFocus=null;
   let subplanDraft=null,subplanSequence=0;
   const collapsedSubplans=new Set();
   let seriesPreview=null,seriesAbort=null,seriesPreviewGeneration=0,recoveryState=null,recoveryGeneration=0;
   let affectedSeriesTask=null,seriesMarkerKnown=typeof options.onSeriesAffectedTask!=='function',seriesMarkerGeneration=0;
-  const timer = {minutes:25, remaining:25*60, running:false, deadline:0, startedAt:0, elapsed:0, related:'', saved:false};
+  const timer = {minutes:25, remaining:25*60, running:false, deadline:0, startedAt:0, finishedAt:0, elapsed:0, related:'', saved:false, save:null};
+  let focusSaveWake=null,focusConnectionEpoch=0;
+  const focusRecordLocked=()=>Boolean(timer.save&&timer.save.status!=='saved');
+  function scheduleFocusSave() {
+    if(disposed||focusSaveWake!==null||timer.save?.status!=='queued')return;
+    focusSaveWake=win.setTimeout(()=>{focusSaveWake=null;void flushFocusSave();},0);
+  }
+  function queueFocusSave() {
+    if(disposed||timer.running||timer.elapsed<60||timer.saved)return;
+    if(timer.save?.accountBlocked){notify('账号连接已改变，旧专注记录仅供核查，禁止向其他账号重发。',true);return;}
+    if(!timer.save){
+      const item=entries().find(item=>item.id===timer.related),started=timer.startedAt||Date.now()-timer.elapsed*1000;
+      const eventId=item?Number(item.instance.id2):null,eventType=item?Number(item.task.id3||1):null;
+      if(item&&(!Number.isSafeInteger(eventId)||eventId<=0||!Number.isSafeInteger(eventType)||eventType<=0)){notify('关联事项的业务标识无效，请刷新后重新选择。',true);return;}
+      const ended=new Date(timer.finishedAt||Date.now()).toString();
+      const record=Object.freeze({time:started,date:dateText(new Date(started)),goodCount:timer.remaining<=0?1:0,badCount:0,minutes:timer.elapsed/60,log:item?JSON.stringify({eventId,eventTitle:item.title,eventType,endTime:ended}):ended});
+      timer.save={record,status:'queued',error:'',epoch:focusConnectionEpoch,accountBlocked:false};
+    }else if(['error','unknown'].includes(timer.save.status)){timer.save.status='queued';timer.save.error='';}
+    scheduleFocusSave();if(view==='focus')render();
+  }
+  async function flushFocusSave() {
+    const state=timer.save;
+    if(disposed||state?.status!=='queued'||state.accountBlocked||state.epoch!==focusConnectionEpoch||writeBusy||viewUpdatePending||!ready)return;
+    state.status='saving';if(view==='focus')render();
+    let operationError=null,returned=false;
+    const saved=await mutation(async()=>{try{const result=await invoke('onSaveFocus',state.record);returned=true;if(state.epoch!==focusConnectionEpoch)throw Object.assign(new Error('账号连接已改变，旧专注记录仅供核查，禁止向其他账号重发。'),{commitState:'unknown'});return result;}catch(error){operationError=error;throw error;}},'专注记录已保存');
+    if(disposed||timer.save!==state||state.epoch!==focusConnectionEpoch)return;
+    if(saved){state.status='saved';state.error='';timer.saved=true;}
+    else{state.status=returned||operationError?.commitState==='unknown'?'unknown':'error';state.error=feedbackMessage||'保存尚未确认，请先刷新核对，再手动重试同一条记录。';}
+    if(view==='focus')render();
+  }
   const taskMap = () => new Map((snapshot.tasks || []).map(record => [id(attrs(record).id1),record]).filter(([key])=>key));
   function seriesTaskLocked(record) {
     if(!seriesMarkerKnown)return true;
@@ -133,14 +165,21 @@ export function mountBiandanApp(host, options = {}) {
     return error?.code==='AUTH_REQUIRED'||error?.code==='reauthorization_required';
   }
   function clearAccount() {
+    ++focusConnectionEpoch;
+    batchAbort?.abort();batchAbort=null;batchState=null;batchMode=false;batchSelection.clear();
     ++seriesMarkerGeneration;affectedSeriesTask=null;seriesMarkerKnown=typeof options.onSeriesAffectedTask!=='function';
     ready=false;stale=false;syncing=false;viewUpdatePending=false;snapshot=emptySnapshot();listFilter='all';
-    timer.running=false;timer.deadline=0;timer.startedAt=0;timer.elapsed=0;timer.remaining=timer.minutes*60;timer.related='';timer.saved=false;
+    timer.running=false;timer.deadline=0;
+    if(timer.save&&!timer.saved){timer.save.status='unknown';timer.save.accountBlocked=true;timer.save.error='账号连接已清除，本次记录未获确认。旧记录仅供核查，禁止向其他账号重发。';}
+    else{timer.startedAt=0;timer.finishedAt=0;timer.elapsed=0;timer.remaining=timer.minutes*60;timer.related='';timer.saved=false;timer.save=null;}
     authorization.clear();adaptive.closeDrawer(false);disposeSeriesState();disposeAttachments();subplanDraft=null;collapsedSubplans.clear();editorOpen=false;editorTarget=null;deletePreview=null;editorDirty=false;++editorGeneration;editor.hidden=true;editor.replaceChildren();root.classList.remove('bd-app--editor-open');
   }
   function controls() {
     root.querySelectorAll('[data-action="new-task"],[data-action="new-list"],[data-action="complete"],[data-action="edit-task"],[data-action="delete-task"],[data-action="edit-list"],[data-action="delete-list"]').forEach(button => button.disabled = !ready || writeBusy||viewUpdatePending||Boolean(seriesPreview));
     root.querySelectorAll('[data-action="complete-subplan"]').forEach(button=>button.disabled=!ready||writeBusy||viewUpdatePending||Boolean(seriesPreview)||button.dataset.available!=='true');
+    root.querySelectorAll('[data-action="batch-mode"],[data-action="batch-select"],[data-action="batch-select-all"],[data-action="batch-open"]').forEach(button=>button.disabled=!ready||writeBusy||viewUpdatePending||Boolean(seriesPreview)||!seriesMarkerKnown||Boolean(batchState));
+    root.querySelector('[data-action="batch-open"]')?.toggleAttribute('disabled',!ready||!batchSelection.size||writeBusy||viewUpdatePending||!seriesMarkerKnown||Boolean(seriesPreview)||Boolean(batchState));
+    if(batchMode&&view==='all')root.querySelectorAll('[data-action="complete"],[data-action="complete-subplan"],[data-action="delete-task"]').forEach(button=>button.disabled=true);
     if(!seriesMarkerKnown)root.querySelectorAll('[data-action="new-task"],[data-action="new-list"],[data-action="complete"],[data-action="complete-subplan"],[data-action="edit-task"],[data-action="delete-task"],[data-action="edit-list"],[data-action="delete-list"]').forEach(button=>button.disabled=true);
     const currentItems=new Map(entries().map(item=>[item.id,item]));
     root.querySelectorAll('[data-action="complete"],[data-action="delete-task"]').forEach(button=>{if(currentItems.get(button.dataset.id)?.stateLocked)button.disabled=true;});
@@ -175,8 +214,8 @@ export function mountBiandanApp(host, options = {}) {
     const time = dated ? `${start||'日期未设置'} ${clock==='00:00:00'?'全天':String(clock).slice(0,5)}` : '未安排日期';
     const urgency = Number(task.isImportant)===1 && Number(task.isUrgency)===1;
     const content=remarkOf(task), draggable=view==='quadrant';
-    const completeControl=item.stateLocked?`<span class="bd-task__state-unknown" aria-label="完成状态待核查">${icon('important')}</span>`:`<button class="bd-task__check" data-action="complete" data-id="${escape(item.id)}" aria-label="${item.done?'撤销完成':'完成'}：${escape(item.title)}" aria-pressed="${item.done}" ${writeBusy?'disabled':''}>${item.done?icon('check'):''}</button>`;
-    return `<article class="bd-task ${item.done&&!item.stateLocked?'bd-task--done':''}" data-occurrence="${escape(item.id)}" ${draggable?`draggable="${!writeBusy&&!adaptive.touchOnly()}"`:''}>${draggable?`<button class="bd-task__drag" data-action="move-task" data-id="${escape(item.id)}" aria-label="移动待办：${escape(item.title)}" title="${adaptive.touchOnly()?'点击后选择象限':'拖到另一象限；也可点击后选择象限'}">${icon('grip')}</button>`:''}${completeControl}<div class="bd-task__content"><button class="bd-task__title" data-action="edit-task" data-id="${escape(item.id)}" title="编辑待办">${escape(item.title)}</button><div class="bd-task__meta">${urgency?'<span class="bd-urgent">重要且紧急</span>':Number(task.isImportant)===1?'<span class="bd-important">重要</span>':''}${Number(task.isCollectible)===1?`<span title="已收藏">${icon('star')}</span>`:''}<span>${escape(time)}</span></div>${content?`<div class="bd-task__note bd-markdown">${renderSafeMarkdown(doc,content,options.renderMarkdown)}</div>`:''}${taskAttachments(item)}${cardSubplans(item)}</div><div class="bd-task__actions"><button data-action="edit-task" data-id="${escape(item.id)}" aria-label="编辑待办：${escape(item.title)}" title="编辑">${icon('edit')}</button><button data-action="delete-task" data-id="${escape(item.id)}" aria-label="删除待办：${escape(item.title)}" title="删除">${icon('trash')}</button></div></article>`;
+    const completeControl=item.stateLocked?`<span class="bd-task__state-unknown" aria-label="完成状态待核查">${icon('important')}</span>`:batchMode&&view==='all'?`<button class="bd-task__select" data-action="batch-select" data-id="${escape(item.id)}" aria-label="选择待办：${escape(item.title)}" aria-pressed="${batchSelection.has(item.id)}">${batchSelection.has(item.id)?icon('check'):''}</button>`:`<button class="bd-task__check" data-action="complete" data-id="${escape(item.id)}" aria-label="${item.done?'撤销完成':'完成'}：${escape(item.title)}" aria-pressed="${item.done}" ${writeBusy?'disabled':''}>${item.done?icon('check'):''}</button>`;
+    return `<article class="bd-task ${item.done&&!item.stateLocked?'bd-task--done':''} ${batchMode&&view==='all'&&batchSelection.has(item.id)?'bd-task--selected':''}" data-occurrence="${escape(item.id)}" ${draggable?`draggable="${!writeBusy&&!adaptive.touchOnly()}"`:''}>${draggable?`<button class="bd-task__drag" data-action="move-task" data-id="${escape(item.id)}" aria-label="移动待办：${escape(item.title)}" title="${adaptive.touchOnly()?'点击后选择象限':'拖到另一象限；也可点击后选择象限'}">${icon('grip')}</button>`:''}${completeControl}<div class="bd-task__content"><button class="bd-task__title" data-action="edit-task" data-id="${escape(item.id)}" title="编辑待办">${escape(item.title)}</button><div class="bd-task__meta">${urgency?'<span class="bd-urgent">重要且紧急</span>':Number(task.isImportant)===1?'<span class="bd-important">重要</span>':''}${Number(task.isCollectible)===1?`<span title="已收藏">${icon('star')}</span>`:''}<span>${escape(time)}</span></div>${content?`<div class="bd-task__note bd-markdown">${renderSafeMarkdown(doc,content,options.renderMarkdown)}</div>`:''}${taskAttachments(item)}${cardSubplans(item)}</div><div class="bd-task__actions"><button data-action="edit-task" data-id="${escape(item.id)}" aria-label="编辑待办：${escape(item.title)}" title="编辑">${icon('edit')}</button><button data-action="delete-task" data-id="${escape(item.id)}" aria-label="删除待办：${escape(item.title)}" title="删除">${icon('trash')}</button></div></article>`;
   }
   function subplanState(item) {
     const state=inspectSubtasks(item.task,item.instance);
@@ -201,7 +240,9 @@ export function mountBiandanApp(host, options = {}) {
   }
   function allTasks(items) {
     const unknown=items.filter(item=>item.stateLocked).length;
-    return `<div class="bd-filter-bar"><label>状态<select name="status-filter" aria-label="待办状态筛选"><option value="pending" ${statusFilter==='pending'?'selected':''}>未完成</option><option value="all" ${statusFilter==='all'?'selected':''}>全部状态</option><option value="completed" ${statusFilter==='completed'?'selected':''}>已完成</option></select></label><span>${items.filter(item=>!item.stateLocked&&(statusFilter==='all'||item.done===(statusFilter==='completed'))).length} 项${unknown?` · ${unknown} 项待核查`:''}</span></div>${taskGroups(items,statusFilter)}`;
+    const eligible=items.filter(item=>!item.stateLocked&&(statusFilter==='all'||item.done===(statusFilter==='completed'))),known=new Set(eligible.map(item=>item.id));for(const key of batchSelection)if(!known.has(key))batchSelection.delete(key);
+    const batchAvailable=typeof options.onPreviewBatchDelete==='function'&&typeof options.onDeleteBatch==='function';
+    return `<div class="bd-filter-bar"><label>状态<select name="status-filter" aria-label="待办状态筛选"><option value="pending" ${statusFilter==='pending'?'selected':''}>未完成</option><option value="all" ${statusFilter==='all'?'selected':''}>全部状态</option><option value="completed" ${statusFilter==='completed'?'selected':''}>已完成</option></select></label><span>${eligible.length} 项${unknown?` · ${unknown} 项待核查`:''}</span>${batchAvailable?`<button data-action="batch-mode" aria-pressed="${batchMode}">${batchMode?'退出选择':'批量选择'}</button>`:''}</div>${batchMode?`<div class="bd-batch-tools" aria-label="批量选择操作"><button data-action="batch-select-all">全选当前筛选</button><span role="status">已选 ${batchSelection.size} 项</span><button class="bd-danger-text" data-action="batch-open" ${batchSelection.size?'':'disabled'}>预览删除</button></div>`:''}${taskGroups(items,statusFilter)}`;
   }
   function welcome() {
     return `<section class="bd-welcome"><div class="bd-welcome__symbol">${icon('cloud')}</div><h2>让便单，留在你的工作现场</h2><p>连接后，在思源里查看清单、安排日期和开始专注。<br>数据来自你授权的便单账号。</p><button class="bd-primary" data-action="connect">${icon('cloud')}连接便单账号</button><small>独立第三方客户端 · 不会导入示例任务到你的账号</small></section>`;
@@ -230,7 +271,9 @@ export function mountBiandanApp(host, options = {}) {
     return `<div class="bd-habits">${habitIDs.map(taskID=>{const instances=items.filter(item=>id(item.task.id1)===taskID),complete=instances.filter(item=>!item.stateLocked&&item.done),current=instances.find(item=>onDate(item,selectedDate)),unknown=instances.some(item=>item.stateLocked);return `<section class="bd-habit"><header><div><h2>${escape(instances[0].title)}</h2><p>${unknown?'完成状态待核查':current?'今日有执行记录':'所选日期没有执行实例'}</p></div>${current?(current.stateLocked?'<button type="button" data-action="inspect-series-migrations">核查系列调整</button>':`<button class="bd-task__check" data-action="complete" data-id="${escape(current.id)}" aria-label="${current.done?'撤销打卡':'完成打卡'}：${escape(current.title)}" aria-pressed="${current.done}">${current.done?icon('check'):''}</button>`):''}</header><div class="bd-habit__stats"><div><strong>${instances.length}</strong><span>已记录实例</span></div><div><strong>${unknown?'待核查':complete.length}</strong><span>已完成</span></div><div><strong>${unknown?'待核查':`${Math.round(complete.length/instances.length*100)}<small>%</small>`}</strong><span>记录完成率</span></div></div></section>`;}).join('')}</div>`;
   }
   function focus(items) {
-    return `<section class="bd-focus"><p class="bd-quiet">把注意力，交给眼前这一件事</p><div class="bd-focus__dial"><span data-focus-label>${timer.running?'正在专注':timer.elapsed?'休息一下，随时继续':'准备开始'}</span><strong data-focus-time>${formatTime(timer.remaining)}</strong><span>专注时间</span></div><div class="bd-focus__actions"><button class="bd-primary" data-action="focus-toggle">${icon(timer.running?'pause':'play')}${timer.running?'暂停专注':'开始专注'}</button><button data-action="focus-reset">重置</button></div><div class="bd-focus__settings"><label>专注时长<span><input type="number" name="focus-minutes" min="1" max="180" value="${timer.minutes}" ${timer.running?'disabled':''}>分钟</span></label><label>关联待办<select name="focus-related" ${timer.running?'disabled':''}><option value="">不关联待办</option>${items.filter(item=>!item.done&&!item.stateLocked).map(item=>`<option value="${escape(item.id)}" ${timer.related===item.id?'selected':''}>${escape(item.title)}</option>`).join('')}</select></label></div><div class="bd-focus__save"><p>专注记录由你确认后保存到便单。</p><button data-action="focus-save" ${timer.running||timer.elapsed<60||timer.saved||writeBusy?'disabled':''}>${timer.saved?'已保存':'保存本次专注'}</button></div></section>`;
+    const state=timer.save,locked=focusRecordLocked(),blocked=writeBusy||viewUpdatePending;
+    const messages={queued:'倒计时已结束，等待当前操作完成后自动保存。',saving:'正在保存本次专注，请稍候。',saved:'本次专注已保存到便单。',error:'自动保存失败，本次记录已保留，请手动重试。',unknown:'保存结果待核查，本次记录已保留。请先刷新核对，再重试核查同一条记录。'};
+    return `<section class="bd-focus"><p class="bd-quiet">把注意力，交给眼前这一件事</p><div class="bd-focus__dial"><span data-focus-label>${timer.running?'正在专注':timer.remaining<=0?'本次专注已结束':timer.elapsed?'休息一下，随时继续':'准备开始'}</span><strong data-focus-time>${formatTime(timer.remaining)}</strong><span>专注时间</span></div><div class="bd-focus__actions"><button class="bd-primary" data-action="focus-toggle" ${locked||blocked?'disabled':''}>${icon(timer.running?'pause':'play')}${timer.running?'暂停专注':'开始专注'}</button><button data-action="focus-reset" ${locked||blocked?'disabled':''}>重置</button></div><div class="bd-focus__settings"><label>专注时长<span><input type="number" name="focus-minutes" min="1" max="180" value="${timer.minutes}" ${timer.running||locked||blocked?'disabled':''}>分钟</span></label><label>关联待办<select name="focus-related" ${timer.running||locked||blocked?'disabled':''}><option value="">不关联待办</option>${items.filter(item=>!item.done&&!item.stateLocked).map(item=>`<option value="${escape(item.id)}" ${timer.related===item.id?'selected':''}>${escape(item.title)}</option>`).join('')}</select></label></div><div class="bd-focus__save"><p data-focus-save-status="${state?.status||'idle'}" role="status">${messages[state?.status]||'倒计时结束后自动保存。暂停时也可手动保存已完成的专注。'}${state?.error?` ${escape(state.error)}`:''}</p><button data-action="focus-save" ${timer.running||timer.elapsed<60||timer.saved||blocked||!ready||state?.accountBlocked||['queued','saving'].includes(state?.status)?'disabled':''}>${timer.saved?'已保存':state?.accountBlocked?'账号已变更，禁止重发':state?.status==='unknown'?'重试核查本次记录':state?.status==='error'?'重试保存本次记录':'保存本次专注'}</button></div></section>`;
   }
   function formatTime(seconds) {const value=Math.max(0,Math.ceil(seconds));return `${String(Math.floor(value/60)).padStart(2,'0')}:${String(value%60).padStart(2,'0')}`;}
   function render() {
@@ -250,7 +293,7 @@ export function mountBiandanApp(host, options = {}) {
     if(!validSnapshot(result))throw new Error('云端返回不完整，请重新连接后刷新。');
     if(typeof options.onSeriesAffectedTask==='function'){seriesMarkerKnown=false;void refreshSeriesMarker();}
     snapshot=result;ready=true;stale=false;viewUpdatePending=false;
-    if(clearFeedback)notify('');render();return true;
+    if(clearFeedback)notify('');render();scheduleFocusSave();return true;
   }
   function receiveSnapshot(event) {
     if(disposed||!event||typeof event!=='object')return;
@@ -298,7 +341,7 @@ export function mountBiandanApp(host, options = {}) {
       return true;
     }
     catch(error){if(!disposed){if(authenticationRequired(error)){clearAccount();render();}notify(error?.message||'保存未确认，请先刷新核对后再重试。',true);}return false;}
-    finally{writeBusy=false;if(!disposed){controls();if(view==='focus')render();}}
+    finally{writeBusy=false;if(!disposed){controls();if(view==='focus')render();scheduleFocusSave();}}
   }
   function invoke(name,...args) {
     if(typeof options[name]!=='function')throw new Error('当前插件尚未连接此操作，请更新插件后重试。');
@@ -373,13 +416,14 @@ export function mountBiandanApp(host, options = {}) {
     return draft.descriptors();
   }
   function closeEditor() {
-    if(writeBusy)return;if(seriesPreview){cancelSeriesPreview();return;}disposeAttachments();subplanDraft=null;editorOpen=false;editorTarget=null;deletePreview=null;editorDirty=false;++editorGeneration;
+    if(writeBusy)return;if(seriesPreview){cancelSeriesPreview();return;}batchState=null;batchAbort=null;disposeAttachments();subplanDraft=null;editorOpen=false;editorTarget=null;deletePreview=null;editorDirty=false;++editorGeneration;
     editor.hidden=true;editor.replaceChildren();root.classList.remove('bd-app--editor-open');if(focusBeforeEditor?.isConnected)focusBeforeEditor.focus();else root.querySelector('.bd-fab')?.focus();
   }
   function beginEditor(title,target=null) {
     if(!ready||writeBusy)return false;
     if(seriesPreview){seriesPreview.box?.querySelector('button')?.focus();return false;}
     if(editorOpen&&editorDirty&&!win.confirm('放弃当前尚未保存的修改，打开另一项？'))return false;
+    batchState=null;batchAbort=null;deleteRequestOptions={};
     adaptive.closeDrawer(false);
     if(!editorOpen)focusBeforeEditor=doc.activeElement?.closest?.('.bd-nav,.bd-lists')?root.querySelector('[data-action="navigation"]'):doc.activeElement;
     disposeAttachments();subplanDraft=null;
@@ -567,18 +611,66 @@ export function mountBiandanApp(host, options = {}) {
     if(!isList){const textarea=editor.querySelector('[name="content"]');if(attachmentInvalid)textarea.readOnly=true;textarea.closest('label').insertAdjacentHTML('afterend',prepareSubplans(editing?target:null)+attachmentSection());renderSubplanDraft();renderAttachments();updateEditorSeriesLock();}
     editor.querySelector('input')?.focus();
   }
-  async function openDelete(kind,target) {
-    if(!target||!beginEditor(kind==='list'?'删除待办单':'删除待办',{kind,record:kind==='list'?target:target.parentRecord,item:kind==='list'?null:target}))return;
-    const current=editorGeneration;
+  function batchCandidates(){return selectedEntries().filter(item=>!item.stateLocked&&(statusFilter==='all'||item.done===(statusFilter==='completed')));}
+  function clearBatchSelection(){batchMode=false;batchSelection.clear();}
+  function leaveBatchPreview(){
+    if(!batchState)return true;if(writeBusy)return false;
+    if(!batchState.result&&!win.confirm('离开当前删除预览并清空选择？尚未执行的删除会取消。'))return false;
+    closeEditor();return true;
+  }
+  function renderBatchPanel(){
+    const state=batchState;if(!state||disposed||!editorOpen)return;
+    let panel=editor.querySelector('[data-batch-workspace]');if(!panel){panel=doc.createElement('div');panel.dataset.batchWorkspace='';panel.className='bd-batch-workspace';editor.append(panel);}
+    const scope=scopeControls(state.scope,state.fromDate,{disabled:state.running||Boolean(state.result)});
+    const content=state.result?batchResultHTML(state.result,{running:state.running,unconfirmed:state.executionFailed}):state.preview?batchPreviewHTML(state.preview):`<p class="bd-form-hint" role="status">${state.reading?'正在核对所选项目和删除范围…':'选择删除范围后，预览实际影响。'}</p>`;
+    reconcileHTML(panel,`${scope}${state.error?`<p class="bd-form-error" role="alert">${escape(state.error)}</p>`:''}<div data-batch-preview>${content}</div>${state.running?'<p class="bd-form-hint">停止会跳过后续待办，当前待办的删除与核查会继续；已删除内容不会恢复。</p>':''}<footer>${state.running?'<button type="button" data-action="batch-stop">停止后续处理</button>':state.result||state.executionFailed?'<button type="button" data-action="batch-result-refresh">刷新核查</button><button type="button" data-action="close-editor">关闭结果</button>':`<button type="button" data-action="close-editor">取消</button><button type="button" class="bd-danger" data-action="batch-confirm" ${state.reading||!state.preview||!state.preview.counts.occurrences||!state.preview.counts.ready?'disabled':''}>确认删除已就绪项目</button>`}</footer>`);
+    const close=editor.querySelector('header [data-action="close-editor"]');if(close)close.disabled=Boolean(state.running);
+  }
+  async function readBatchPreview(){
+    const state=batchState;if(!state||state.running||state.result||state.executionFailed)return;state.preview=null;state.error='';state.reading=true;const marker=++state.generation;renderBatchPanel();
+    try{
+      const settings={scope:state.scope,...(state.scope==='future_pending'?{fromDate:state.fromDate}:{})};
+      if(state.scope==='future_pending'&&!normalizeDate(state.fromDate))throw new Error('请选择有效的起始日期。');
+      const plan=checkedBatchPreview(await invoke('onPreviewBatchDelete',state.targets,settings));
+      if(disposed||batchState!==state||marker!==state.generation)return;state.preview=plan;
+    }catch(error){if(!disposed&&batchState===state&&marker===state.generation)state.error=error?.message||'无法确认删除范围，请重新预览。';}
+    finally{if(!disposed&&batchState===state&&marker===state.generation){state.reading=false;renderBatchPanel();}}
+  }
+  function openBatchDeletion(){
+    const targets=batchCandidates().filter(item=>batchSelection.has(item.id)).map(item=>({parentRecord:item.parentRecord,occurrenceRecord:item.record,expectedTaskVersion:item.parentRecord.version,expectedOccurrenceVersion:item.record.version}));
+    if(!targets.length)return;
+    if(!beginEditor('批量删除待办',{kind:'batch-delete'}))return;
+    batchState={targets,scope:'occurrence',fromDate:today(),preview:null,result:null,error:'',reading:false,running:false,executionFailed:false,generation:0};
+    void readBatchPreview();
+  }
+  async function executeBatchDeletion(){
+    const state=batchState;if(!state?.preview||state.running||state.reading||state.result||state.executionFailed||writeBusy||viewUpdatePending)return;
+    const plan=state.preview;state.running=true;state.error='';batchAbort=new AbortController();const controller=batchAbort;renderBatchPanel();
+    const saved=await mutation(async()=>{
+      const result=await invoke('onDeleteBatch',plan,{signal:controller.signal,onProgress:value=>{
+        if(disposed||batchState!==state)return;try{state.result=checkedBatchResult(value,plan.total,{running:true});renderBatchPanel();}catch{/* Unconfirmed progress never enables another write. */}
+      }});
+      if(disposed||batchState!==state)throw new Error('页面已关闭，删除结果请重新读取核查。');
+      state.result=checkedBatchResult(result,plan.total);return result;
+    },'批量处理已结束，请查看逐项结果。');
+    if(disposed||batchState!==state)return;state.running=false;batchAbort=null;
+    if(!saved){state.executionFailed=true;state.error=feedbackMessage||'处理结果未获确认，请先刷新核查，不要重复提交。';}
+    clearBatchSelection();render();renderBatchPanel();
+  }
+  async function openDelete(kind,target,settings={},reload=false) {
+    if(!target||(!reload&&!beginEditor(kind==='list'?'删除待办单':'删除待办',{kind,record:kind==='list'?target:target.parentRecord,item:kind==='list'?null:target})))return;
+    const current=++editorGeneration;deletePreview=null;deleteRequestOptions={...settings};
+    if(reload)editor.querySelectorAll('form,.bd-delete-scope,.bd-delete-loading,.bd-form-error').forEach(node=>node.remove());
+    if(kind==='task'&&(Number(target.task.isLoop)>0||Number(target.task.loopSet)>0))editor.insertAdjacentHTML('beforeend',scopeControls(settings.scope||'occurrence',settings.fromDate||today(),{single:true}));
     editor.insertAdjacentHTML('beforeend','<p class="bd-delete-loading" role="status">正在核对删除范围…</p>');
     try{
-      const plan=kind==='list'?await invoke('onPreviewDeleteList',target,{expectedVersion:target.version}):await invoke('onPreviewDeleteTask',target.parentRecord,target.record,{expectedTaskVersion:target.parentRecord.version,expectedOccurrenceVersion:target.record.version});
+      const plan=kind==='list'?await invoke('onPreviewDeleteList',target,{expectedVersion:target.version}):await invoke('onPreviewDeleteTask',target.parentRecord,target.record,{expectedTaskVersion:target.parentRecord.version,expectedOccurrenceVersion:target.record.version,...settings});
       if(disposed||!editorOpen||current!==editorGeneration)return;
       if(!plan||typeof plan!=='object')throw new Error('未能核对删除范围，请刷新后重试。');
       deletePreview=plan;editor.querySelector('.bd-delete-loading')?.remove();
       const list=attrs(target),name=kind==='list'?list.favoritesName:target.title;
-      const description=kind==='list'?`待办单内 ${Number.isInteger(plan.taskCount)?plan.taskCount:'所含'} 项任务将移到「未分类」，任务和执行记录会保留。`:plan.deletesTaskDefinition?'将删除这条一次性待办及其执行记录。':`只删除当前执行实例（${escape(normalizeDate(target.instance.startTime)||'未安排日期')}），保留系列和其他执行实例。`;
-      editor.insertAdjacentHTML('beforeend',`<form data-form="delete-${kind}"><h3 class="bd-delete-title">${escape(name||'未命名')}</h3><p class="bd-delete-explanation">${description}</p><p class="bd-form-hint">删除后无法在插件内撤销，请确认范围。</p><p class="bd-form-error" role="alert" hidden></p><footer><button type="button" data-action="close-editor">取消</button><button class="bd-danger" type="submit">确认删除${kind==='list'?'待办单':'本条待办'}</button></footer></form>`);
+      const description=kind==='list'?`待办单内 ${Number.isInteger(plan.taskCount)?plan.taskCount:'所含'} 项任务将移到「未分类」，任务和执行记录会保留。`:settings.scope==='series'?`将删除整个待办系列及 ${Number.isSafeInteger(plan.occurrenceCount)?plan.occurrenceCount:'所含'} 次执行记录，包括已完成与历史安排。`:settings.scope==='future_pending'?`将删除从 ${escape(plan.fromDate||settings.fromDate)} 起符合预览截点的未完成安排，共 ${Number.isSafeInteger(plan.occurrenceCount)?plan.occurrenceCount:'所含'} 次执行记录。${plan.deletesTaskDefinition?'同时删除待办定义。':'已完成与其他范围记录保留。'}`:plan.deletesTaskDefinition?'将删除这条一次性待办及其执行记录。':`只删除当前执行实例（${escape(normalizeDate(target.instance.startTime)||'未安排日期')}），保留系列和其他执行实例。`;
+      editor.insertAdjacentHTML('beforeend',`<form data-form="delete-${kind}"><h3 class="bd-delete-title">${escape(name||'未命名')}</h3><p class="bd-delete-explanation">${description}</p>${kind==='task'&&Number.isSafeInteger(plan.abandonedCount)?`<p class="bd-form-hint">其中包含 ${plan.abandonedCount} 次已放弃安排。</p>`:''}${plan.cutoff?`<p class="bd-form-hint">本次预览的时间截点：${escape(plan.cutoff.date)} ${escape(plan.cutoff.time)}。</p>`:''}<p class="bd-form-hint">删除后无法在插件内撤销，请确认范围。</p><p class="bd-form-error" role="alert" hidden></p><footer><button type="button" data-action="close-editor">取消</button><button class="bd-danger" type="submit">确认删除${kind==='list'?'待办单':'本条待办'}</button></footer></form>`);
       editor.querySelector('[data-form] button')?.focus();
     }catch(error){if(disposed||current!==editorGeneration)return;editor.querySelector('.bd-delete-loading')?.remove();const message=doc.createElement('p');message.className='bd-form-error';message.setAttribute('role','alert');message.textContent=error?.message||'未能核对删除范围，请刷新后重试。';editor.appendChild(message);}
   }
@@ -589,8 +681,8 @@ export function mountBiandanApp(host, options = {}) {
     if(editorTaskLocked()){error.textContent='该系列状态尚待核查，当前草稿保留。请先核查调整结果，再重新打开待办保存。';error.hidden=false;return;}
     let operation,success='已保存';
     if(kind.startsWith('delete-')){
-      if(!deletePreview)return;const plan=deletePreview;
-      operation=kind==='delete-list'?()=>invoke('onDeleteList',target.record,{expectedVersion:target.record.version,preview:plan,taskAction:'move_to_default'}):()=>invoke('onDeleteTask',target.record,target.item.record,{expectedTaskVersion:target.record.version,expectedOccurrenceVersion:target.item.record.version,preview:plan});
+      if(!deletePreview)return;const plan=deletePreview,scopeOptions={...deleteRequestOptions};
+      operation=kind==='delete-list'?()=>invoke('onDeleteList',target.record,{expectedVersion:target.record.version,preview:plan,taskAction:'move_to_default'}):()=>invoke('onDeleteTask',target.record,target.item.record,{expectedTaskVersion:target.record.version,expectedOccurrenceVersion:target.item.record.version,preview:plan,...scopeOptions});
       success=kind==='delete-list'?'待办单已删除，原任务已移到未分类':'本条待办已删除';
     }else{
       const title=String(values.get('title')||'').trim();if(!title)return;
@@ -622,7 +714,7 @@ export function mountBiandanApp(host, options = {}) {
         };success='待办已保存';
       }
     }
-    const fields=[...form.querySelectorAll('button,input,textarea,select')].filter(field=>field.dataset.action!=='cancel-upload'),disabled=fields.map(field=>field.disabled);fields.forEach(field=>field.disabled=true);
+    const fields=[...form.querySelectorAll('button,input,textarea,select'),...editor.querySelectorAll('.bd-delete-scope input,.bd-delete-scope select')].filter(field=>field.dataset.action!=='cancel-upload'),disabled=fields.map(field=>field.disabled);fields.forEach(field=>field.disabled=true);
     const saved=await mutation(operation,success);fields.forEach((field,index)=>field.disabled=disabled[index]||viewUpdatePending&&field.tagName==='BUTTON'&&field.type==='submit');
     if(disposed)return;
     if(saved){if(kind==='delete-list'&&listFilter===id(attrs(target.record).id3)){listFilter='all';render();}closeEditor();}else{error.textContent=feedbackMessage;error.hidden=false;renderAttachments();}
@@ -631,12 +723,20 @@ export function mountBiandanApp(host, options = {}) {
     if(event.target.classList?.contains('bd-series-recovery-layer')){closeSeriesRecovery();return;}
     if(event.target.classList?.contains('bd-attachment-preview')){closeAttachmentPreview();return;}
     const button=event.target.closest?.('button');if(!button||!root.contains(button)||button.disabled)return;
-    if(button.dataset.view){view=button.dataset.view;adaptive.closeDrawer(false);render();return;}
-    if(button.dataset.list){listFilter=button.dataset.list;adaptive.closeDrawer();render();return;}
+    if(button.dataset.view){if(!leaveBatchPreview())return;clearBatchSelection();view=button.dataset.view;adaptive.closeDrawer(false);render();return;}
+    if(button.dataset.list){if(!leaveBatchPreview())return;clearBatchSelection();listFilter=button.dataset.list;adaptive.closeDrawer();render();return;}
     if(button.dataset.date){selectedDate=button.dataset.date;month=selectedDate.slice(0,7);render();return;}
     const action=button.dataset.action;
     if((writeBusy||viewUpdatePending||seriesPreview)&&['new-task','new-list','edit-task','edit-list','delete-task','delete-list','complete','complete-subplan','move-task','add-subplan','remove-subplan'].includes(action)||writeBusy&&['close-editor','refresh'].includes(action))return;
     if(writeBusy&&action?.startsWith('focus-'))return;
+    if(focusRecordLocked()&&['focus-toggle','focus-reset'].includes(action)){notify('请先完成本次专注记录的保存或核查，再开始下一次。',true);return;}
+    if(action==='batch-stop'){batchAbort?.abort();button.disabled=true;button.textContent='正在停止后续处理…';return;}
+    if(action==='batch-confirm')return executeBatchDeletion();
+    if(action==='batch-result-refresh'){if(writeBusy)return;button.disabled=true;const confirmed=await refresh();if(batchState){batchState.error=confirmed?'已刷新云端，请核对逐项结果和当前记录；再次操作需关闭结果并重新选择。':'刷新未完成，请稍后重试核查。';renderBatchPanel();}return;}
+    if(action==='batch-mode'){if(!leaveBatchPreview())return;batchMode=!batchMode;batchSelection.clear();render();return;}
+    if(action==='batch-select'||action==='edit-task'&&batchMode&&view==='all'&&!batchState){const item=batchCandidates().find(item=>item.id===button.dataset.id);if(item){if(batchSelection.has(item.id))batchSelection.delete(item.id);else batchSelection.add(item.id);render();}return;}
+    if(action==='batch-select-all'){for(const item of batchCandidates())batchSelection.add(item.id);render();return;}
+    if(action==='batch-open')return openBatchDeletion();
     if(action==='navigation'||action==='list-navigation'){adaptive.toggleDrawer(action==='navigation'?'navigation':'lists');return;}
     if(action==='close-drawer'){adaptive.closeDrawer();return;}
     if(action==='close-host'){if(writeBusy)return;if(editorOpen){closeEditor();return;}if(typeof options.onClose==='function')await options.onClose();return;}
@@ -702,27 +802,33 @@ export function mountBiandanApp(host, options = {}) {
     if(action==='month-prev'||action==='month-next'){const [year,mon]=month.split('-').map(Number);const next=new Date(year,mon-1+(action==='month-next'?1:-1),1);selectedDate=dateText(next);month=selectedDate.slice(0,7);render();return;}
     if(action==='focus-toggle'){
       if(timer.running){tick();timer.running=false;timer.deadline=0;}
-      else{if(timer.saved){notify('本次记录已保存，请先重置再开始。');return;}if(timer.remaining<=0){notify('本次专注已结束，请保存记录或重置。');return;}if(!timer.startedAt)timer.startedAt=Date.now();timer.deadline=Date.now()+timer.remaining*1000;timer.running=true;}render();return;
+      else{if(timer.saved){notify('本次记录已保存，请先重置再开始。');return;}if(timer.remaining<=0){notify('本次专注已结束，请核查保存状态。');return;}if(!timer.startedAt)timer.startedAt=Date.now();timer.deadline=Date.now()+timer.remaining*1000;timer.running=true;}render();return;
     }
     if(action==='focus-reset'){
       if(timer.elapsed>=60&&!timer.saved&&!win.confirm('放弃本次尚未保存的专注记录？'))return;
-      timer.remaining=timer.minutes*60;timer.elapsed=0;timer.startedAt=0;timer.running=false;timer.saved=false;render();return;
+      timer.remaining=timer.minutes*60;timer.elapsed=0;timer.startedAt=0;timer.finishedAt=0;timer.deadline=0;timer.running=false;timer.saved=false;timer.save=null;render();return;
     }
     if(action==='focus-save'&&!timer.running&&timer.elapsed>=60&&!timer.saved){
-      const item=entries().find(item=>item.id===timer.related), started=timer.startedAt || Date.now()-timer.elapsed*1000;
-      const eventId=item?Number(item.instance.id2):null, eventType=item?Number(item.task.id3 || 1):null;
-      if(item&&(!Number.isSafeInteger(eventId)||eventId<=0||!Number.isSafeInteger(eventType)||eventType<=0)){notify('关联事项的业务标识无效，请刷新后重新选择。',true);return;}
-      const record={time:started,date:dateText(new Date(started)),goodCount:timer.remaining<=0?1:0,badCount:0,minutes:timer.elapsed/60,log:item?JSON.stringify({eventId,eventTitle:item.title,eventType,endTime:new Date().toString()}):new Date().toString()};
-      const saved=await mutation(()=>invoke('onSaveFocus',record),'专注记录已保存');if(saved)timer.saved=true;render();
+      queueFocusSave();
     }
   }
   function change(event) {
+    if(['batch-delete-scope','batch-delete-date'].includes(event.target.name)){
+      const state=batchState;if(!state||writeBusy||state.running||state.result||state.executionFailed)return;
+      const scope=editor.querySelector('[name="batch-delete-scope"]')?.value||'occurrence',fromDate=editor.querySelector('[name="batch-delete-date"]')?.value||state.fromDate;state.scope=scope;state.fromDate=fromDate;state.preview=null;editorDirty=true;void readBatchPreview();return;
+    }
+    if(['single-delete-scope','single-delete-date'].includes(event.target.name)){
+      if(writeBusy||editorTarget?.kind!=='task'||!editorTarget.item)return;
+      const scope=editor.querySelector('[name="single-delete-scope"]')?.value||'occurrence',fromDate=editor.querySelector('[name="single-delete-date"]')?.value||today();
+      const settings=scope==='occurrence'?{}:{scope,...(scope==='future_pending'?{fromDate}:{})};void openDelete('task',editorTarget.item,settings,true);return;
+    }
     if(seriesPreview&&!writeBusy&&editor.contains(event.target)){cancelSeriesPreview();notify('草稿已变化，请重新预览整个系列。',true);}
     if(['attachmentFiles','attachmentImages'].includes(event.target.name)){stageAttachments(event.target.files);event.target.value='';return;}
     if(editor.contains(event.target))editorDirty=true;
     if(writeBusy&&event.target.name?.startsWith('focus-'))return;
+    if(focusRecordLocked()&&event.target.name?.startsWith('focus-')){if(view==='focus')render();return;}
     if(event.target.name==='status-filter'){
-      if(['pending','all','completed'].includes(event.target.value)){statusFilter=event.target.value;render();root.querySelector('[name="status-filter"]')?.focus();}return;
+      if(['pending','all','completed'].includes(event.target.value)){if(!leaveBatchPreview())return;clearBatchSelection();statusFilter=event.target.value;render();root.querySelector('[name="status-filter"]')?.focus();}return;
     }
     if(event.target.name==='noTime'||event.target.name==='allDay'){
       const form=event.target.closest('form'),noTime=Boolean(form.querySelector('[name="noTime"]')?.checked),allDay=Boolean(form.querySelector('[name="allDay"]')?.checked);
@@ -735,7 +841,7 @@ export function mountBiandanApp(host, options = {}) {
     if(event.target.name==='important'||event.target.name==='urgent'){
       const form=event.target.closest('form'),select=form.querySelector('[name="quadrant"]');if(select)select.value=`${+form.querySelector('[name="important"]').checked}:${+form.querySelector('[name="urgent"]').checked}`;
     }
-    if(event.target.name==='focus-minutes'&&!timer.running){const value=Number(event.target.value);if(!Number.isInteger(value)||value<1||value>180){event.target.value=String(timer.minutes);return;}if(timer.elapsed&&!timer.saved){event.target.value=String(timer.minutes);notify('请先保存或重置本次专注，再修改时长。');return;}timer.minutes=value;timer.remaining=value*60;timer.elapsed=0;timer.startedAt=0;timer.saved=false;render();}
+    if(event.target.name==='focus-minutes'&&!timer.running){const value=Number(event.target.value);if(!Number.isInteger(value)||value<1||value>180){event.target.value=String(timer.minutes);return;}if(timer.elapsed&&!timer.saved){event.target.value=String(timer.minutes);notify('请先保存或重置本次专注，再修改时长。');return;}timer.minutes=value;timer.remaining=value*60;timer.elapsed=0;timer.startedAt=0;timer.finishedAt=0;timer.saved=false;timer.save=null;render();}
     if(event.target.name==='focus-related'&&!timer.running)timer.related=event.target.value;
   }
   function input(event) {
@@ -806,7 +912,7 @@ export function mountBiandanApp(host, options = {}) {
     const remaining=Math.max(0,(timer.deadline-Date.now())/1000), consumed=Math.max(0,timer.remaining-remaining);
     timer.elapsed+=consumed;timer.remaining=remaining;
     const display=root.querySelector('[data-focus-time]');if(display)display.textContent=formatTime(timer.remaining);
-    if(remaining<=0){timer.running=false;timer.deadline=0;notify('本次专注已结束，可以保存记录。');if(view==='focus')render();}
+    if(remaining<=0){timer.finishedAt=timer.deadline;timer.running=false;timer.deadline=0;notify('本次专注已结束，将自动保存记录。');queueFocusSave();}
   }
   const interval=win.setInterval(tick,500);
   function activity(){options.noteActivity?.();}
@@ -817,5 +923,5 @@ export function mountBiandanApp(host, options = {}) {
   void refreshSeriesMarker();
   void refresh({force:false});
   void authorization.restore();
-  return {refresh,applySnapshot,isInteracting:()=>adaptive.isOpen()||authorization.isOpen()||writeBusy||editorOpen||Boolean(draggingId)||Boolean(seriesPreview)||Boolean(recoveryState)||Boolean(root.querySelector('.bd-attachment-preview')),dispose(){if(disposed)return;disposed=true;adaptive.dispose();authorization.dispose();++generation;++editorGeneration;++seriesMarkerGeneration;subplanDraft=null;disposeSeriesState();disposeAttachments();win.clearInterval(interval);if(typeof unsubscribe==='function')unsubscribe();for(const [name,listener]of Object.entries(listeners))root.removeEventListener(name,listener,name==='scroll'||name==='toggle');root.remove();if(!hadHostClass)host.classList.remove('bd-plugin-host');}};
+  return {refresh,applySnapshot,isInteracting:()=>adaptive.isOpen()||authorization.isOpen()||batchMode||writeBusy||editorOpen||Boolean(draggingId)||Boolean(seriesPreview)||Boolean(recoveryState)||Boolean(root.querySelector('.bd-attachment-preview')),dispose(){if(disposed)return;disposed=true;if(focusSaveWake!==null)win.clearTimeout(focusSaveWake);focusSaveWake=null;batchAbort?.abort();batchAbort=null;batchState=null;batchSelection.clear();adaptive.dispose();authorization.dispose();++generation;++editorGeneration;++seriesMarkerGeneration;subplanDraft=null;disposeSeriesState();disposeAttachments();win.clearInterval(interval);if(typeof unsubscribe==='function')unsubscribe();for(const [name,listener]of Object.entries(listeners))root.removeEventListener(name,listener,name==='scroll'||name==='toggle');root.remove();if(!hadHostClass)host.classList.remove('bd-plugin-host');}};
 }
